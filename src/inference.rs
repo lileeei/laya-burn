@@ -1,7 +1,8 @@
 //! Inference pipeline: port of RLAgent.system_one from rl_agent_api.py.
 
-use burn::tensor::{Device, Int, Tensor};
+use burn::tensor::{capture, Device, Graph, Int, Tensor};
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::calibration::Calibration;
 use crate::model::{EncoderConfig, Laya, Ropes};
@@ -118,8 +119,22 @@ impl RlAgent {
         Self { model, ropes, tok, max_len, head_max_len, temperature, temperature_by_options, clamped_temperatures }
     }
 
+    /// Create the opt-in graph capture/replay engine (LAYA_REPLAY=1).
+    pub fn replay_engine(&self, device: &Device) -> ReplayEngine<'_> {
+        ReplayEngine::new(self, device)
+    }
+
     /// state + questions -> typed answers, one forward pass for the whole batch.
-    pub fn system_one(&self, device: &Device, state: &Value, questions: &[QuestionInput]) -> Vec<Answer> {
+    /// 'replay' is Some(..) only when LAYA_REPLAY=1: the opt-in graph
+    /// capture/replay engine (see ReplayEngine). Pass None for the direct
+    /// forward path.
+    pub fn system_one(
+        &self,
+        device: &Device,
+        state: &Value,
+        questions: &[QuestionInput],
+        replay: Option<&mut ReplayEngine<'_>>,
+    ) -> Vec<Answer> {
         let state_str = PythonJson::state(state);
 
         let mut seqs = Vec::new();
@@ -137,25 +152,38 @@ impl RlAgent {
         let batch_len: usize = seqs.iter().map(|(ids, _, _)| ids.len()).max().unwrap();
         let n_markers: usize = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
         let b = collate(&seqs, self.tok.pad_token_id, batch_len, n_markers);
+        let Batch { input_ids: b_input_ids, attention_mask: b_attention_mask, marker_pos: b_marker_pos, marker_mask: b_marker_mask, qtype: b_qtype } = b;
 
         if let Ok(dir) = std::env::var("LAYA_DUMP_DIR") {
             let _ = std::fs::create_dir_all(&dir);
-            let rows: Vec<String> = b
-                .input_ids
+            let rows: Vec<String> = b_input_ids
                 .iter()
                 .map(|r| r.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
                 .collect();
             let _ = std::fs::write(format!("{dir}/all_rows.txt"), rows.join("
 "));
         }
-        let (logits, act_logits) = self.model.forward(
-            t2i(b.input_ids, batch_len, device),
-            t2i(b.attention_mask, batch_len, device),
-            t2i(b.marker_pos, n_markers, device),
-            t2i(b.marker_mask, n_markers, device),
-            t1i(b.qtype, device),
-            &self.ropes,
-        );
+        // LAYA_REPLAY=1 routes the forward through the per-shape graph
+        // cache; when unset (replay == None) the direct path below runs
+        // exactly as before.
+        let key: ShapeKey = (seqs.len(), batch_len, n_markers);
+        let (logits, act_logits) = match replay {
+            None => self.model.forward(
+                t2i(b_input_ids, batch_len, device),
+                t2i(b_attention_mask, batch_len, device),
+                t2i(b_marker_pos, n_markers, device),
+                t2i(b_marker_mask, n_markers, device),
+                t1i(b_qtype, device),
+                &self.ropes,
+            ),
+            Some(engine) => engine.run(key, || StableInputs {
+                input_ids: t2i(b_input_ids, batch_len, device),
+                attention_mask: t2i(b_attention_mask, batch_len, device),
+                marker_pos: t2i(b_marker_pos, n_markers, device),
+                marker_mask: t2i(b_marker_mask, n_markers, device),
+                qtype: t1i(b_qtype, device),
+            }),
+        };
 
         let logits = logits.to_data().as_slice::<f32>().unwrap().to_vec();
         let act_row = act_logits.to_data().as_slice::<f32>().unwrap().to_vec();
@@ -197,6 +225,208 @@ impl RlAgent {
 
 
 
+/// Opt-in graph capture/replay fast path (env LAYA_REPLAY=1).
+///
+/// For every distinct collated shape we capture the model forward ONCE with
+/// burn's runtime graph API and re-run it with Graph::replay afterwards.
+/// The graph has no explicit inputs: it reads exactly the device buffers the
+/// captured closure touched, so the engine owns STABLE input tensors per shape
+/// and refreshes them IN PLACE between replays (Tensor::inplace +
+/// slice_assign); burn tensor clones alias the same buffer, so the closure
+/// cloning them still reads the refreshed bytes.
+///
+/// The closures borrow the agent's model and ropes, so a ReplayEngine must not
+/// outlive the RlAgent it was created from (the 'a lifetime enforces this).
+pub struct ReplayEngine<'a> {
+    device: Device,
+    model: &'a Laya,
+    ropes: &'a Ropes,
+    entries: HashMap<ShapeKey, ReplayEntry<'a>>,
+    /// Set when graph capture failed once (e.g. a host read mid-forward is
+    /// rejected inside a hardware capture window); further calls then use the
+    /// direct forward so results stay correct.
+    capture_disabled: bool,
+}
+
+/// The stable inputs shared between the engine (which refreshes them) and the
+/// captured closure (which clones them per invocation). The per-invocation
+/// clones are transient: between replays the slot holds the only tensor
+/// handle, so an in-place refresh writes the same buffer the captured graph
+/// reads.
+type SharedInputs = std::rc::Rc<std::cell::RefCell<StableInputs>>;
+
+/// (rows, padded seq len, padded marker slots) identifying a collated shape.
+type ShapeKey = (usize, usize, usize);
+
+type ForwardOutput = (Tensor<2>, Tensor<2>);
+
+/// Stable device input buffers for one shape, held across replays.
+#[derive(Clone)]
+struct StableInputs {
+    input_ids: Tensor<2, Int>,
+    attention_mask: Tensor<2, Int>,
+    marker_pos: Tensor<2, Int>,
+    marker_mask: Tensor<2, Int>,
+    qtype: Tensor<1, Int>,
+}
+
+impl StableInputs {
+    /// Overwrite every stable buffer in place with a freshly collated batch.
+    /// Shapes match by construction of the ShapeKey lookup.
+    fn refresh(&mut self, fresh: StableInputs) {
+        let [r, c] = self.input_ids.dims();
+        self.input_ids.inplace(|t| t.slice_assign([0..r, 0..c], fresh.input_ids));
+        self.attention_mask.inplace(|t| t.slice_assign([0..r, 0..c], fresh.attention_mask));
+        self.marker_pos.inplace(|t| t.slice_assign([0..r, 0..c], fresh.marker_pos));
+        self.marker_mask.inplace(|t| t.slice_assign([0..r, 0..c], fresh.marker_mask));
+        let n = self.qtype.dims()[0];
+        self.qtype.inplace(|t| t.slice_assign([0..n], fresh.qtype));
+    }
+}
+
+struct ReplayEntry<'a> {
+    inputs: SharedInputs,
+    graph: Graph<ForwardOutput, Box<dyn FnMut() -> ForwardOutput + 'a>>,
+}
+
+impl<'a> ReplayEngine<'a> {
+    pub fn new(agent: &'a RlAgent, device: &Device) -> Self {
+        Self {
+            device: device.clone(),
+            model: &agent.model,
+            ropes: &agent.ropes,
+            entries: HashMap::new(),
+            capture_disabled: false,
+        }
+    }
+
+    fn direct(&self, inputs: &StableInputs) -> ForwardOutput {
+        self.model.forward(
+            inputs.input_ids.clone(),
+            inputs.attention_mask.clone(),
+            inputs.marker_pos.clone(),
+            inputs.marker_mask.clone(),
+            inputs.qtype.clone(),
+            self.ropes,
+        )
+    }
+
+    /// Run the forward for 'key': capture on first encounter (capture itself
+    /// warms up the kernels), refresh + replay afterwards.
+    fn run(&mut self, key: ShapeKey, fresh: impl FnOnce() -> StableInputs) -> ForwardOutput {
+        if self.capture_disabled {
+            return self.direct(&fresh());
+        }
+        if let Some(entry) = self.entries.get_mut(&key) {
+            {
+                // Refresh the stable buffers in place. Scoped: on software
+                // replay the closure re-borrows the slot, so the RefCell
+                // borrow must be released before replay.
+                entry.inputs.borrow_mut().refresh(fresh());
+            }
+            // SAFETY: replaying is sound here because the three clauses of
+            // Graph::replay's contract all hold for this engine:
+            // - Liveness: the only tensors the captured closure read are the
+            //   stable input buffers, owned by entry.inputs (the Rc slot
+            //   shares them with the closure, whose per-invocation clones are
+            //   dropped before control returns here), and its own
+            //   intermediates and outputs, owned by the graph itself. Both
+            //   live exactly as long as the graph, inside this entry.
+            // - No concurrent use: this engine, the agent, and its device are
+            //   used single-threaded here; no other stream or thread reads or
+            //   writes these tensors while a replay executes.
+            // - Same-stream refreshes: the in-place refresh write above and
+            //   the to_data() read the caller performs after this returns are
+            //   issued on the same device/stream the graph was captured on,
+            //   so they are ordered before/after the replay rather than
+            //   racing it with stale or torn data. Because the slot held the
+            //   only handle at refresh time, Tensor::inplace wrote the very
+            //   buffers the recorded graph reads.
+            let (logits, act_logits) = unsafe { entry.graph.replay() };
+            (logits.clone(), act_logits.clone())
+        } else {
+            let inputs: SharedInputs = std::rc::Rc::new(std::cell::RefCell::new(fresh()));
+            // Each invocation clones the stable tensors out of the slot
+            // (aliasing the same buffers); the clones are consumed by forward
+            // and dropped, so between invocations the slot holds the only
+            // handle — the precondition for the in-place refresh above, and
+            // for software replay (flex/WGPU/Metal re-run the closure) it
+            // always reads the current contents.
+            let slot = inputs.clone();
+            let model = self.model;
+            let ropes = self.ropes;
+            // The forward still host-reads a mask mid-graph (its removal is in
+            // flight elsewhere). Hardware capture windows (the wgpu/Metal
+            // runtime selected by Device::default() here) record dispatches
+            // only, so that read is rejected and the forward's unwrap()
+            // panics — but ONLY during the capture run; the warmup runs read
+            // normally. Catch the panic INSIDE the closure and return a dummy
+            // output so `capture` still reaches graph_stop_capture and the
+            // device leaves capture mode cleanly. A panicked-out closure
+            // would skip the stop and poison the device for the rest of the
+            // process. If the flag is set afterwards, discard the (useless)
+            // graph and fall back to direct execution; results are identical
+            // either way, so LAYA_REPLAY stays correct independently of the
+            // model.rs change.
+            let read_failed = std::rc::Rc::new(std::cell::Cell::new(false));
+            let flag = read_failed.clone();
+            // Pre-allocated dummy outputs for the failure path: allocating
+            // fresh memory inside an open capture window is illegal, so the
+            // closure only clones these handles (burn clones alias buffers).
+            let dummy = (
+                Tensor::<1>::from_floats([0.0f32], &self.device).reshape([1, 1]),
+                Tensor::<1>::from_floats([0.0f32], &self.device).reshape([1, 1]),
+            );
+            let closure: Box<dyn FnMut() -> ForwardOutput + 'a> = Box::new(move || {
+                let inputs = slot.borrow().clone();
+                let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    model.forward(
+                        inputs.input_ids,
+                        inputs.attention_mask,
+                        inputs.marker_pos,
+                        inputs.marker_mask,
+                        inputs.qtype,
+                        ropes,
+                    )
+                }));
+                match attempt {
+                    Ok(out) => out,
+                    Err(e) => {
+                        let msg = e
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "<non-string panic>".to_string());
+                        eprintln!("CAPTURE-PANIC: {msg}");
+                        flag.set(true);
+                        (dummy.0.clone(), dummy.1.clone())
+                    }
+                }
+            });
+            // Silence the default panic hook for the expected mid-capture
+            // read failure above; the read_failed flag reports it cleanly.
+            let prev_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let graph = capture(&self.device, closure);
+            std::panic::set_hook(prev_hook);
+            if read_failed.get() {
+                eprintln!(
+                    "laya: graph capture failed (host read mid-forward); \
+                     falling back to direct execution"
+                );
+                self.capture_disabled = true;
+                return self.direct(&inputs.borrow());
+            }
+            let entry = ReplayEntry { inputs, graph };
+            // The capture run already produced the output for THIS batch.
+            let (logits, act_logits) = entry.graph.output();
+            let out = (logits.clone(), act_logits.clone());
+            self.entries.insert(key, entry);
+            out
+        }
+    }
+}
+
 fn t2i(rows: Vec<Vec<i64>>, cols: usize, device: &Device) -> Tensor<2, Int> {
     let n_rows = rows.len();
     let flat: Vec<i64> = rows.into_iter().flatten().collect();
@@ -206,6 +436,48 @@ fn t2i(rows: Vec<Vec<i64>>, cols: usize, device: &Device) -> Tensor<2, Int> {
 fn t1i(v: Vec<i64>, device: &Device) -> Tensor<1, Int> {
     let n = v.len();
     Tensor::<1, Int>::from_data(burn::tensor::TensorData::new(v, [n]), device)
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    use burn::tensor::TensorData;
+
+    /// The replay contract depends on the shared-slot pattern: the closure
+    /// clones the stable tensors per invocation and drops the clones, so at
+    /// refresh time the slot holds the only handle and Tensor::inplace
+    /// rewrites the same buffer the captured graph reads. A RETAINED clone
+    /// (held across the refresh) would break that: with another handle
+    /// alive, inplace+slice_assign swaps in a fresh buffer and the replay
+    /// would read stale bytes.
+    #[test]
+    fn refresh_through_shared_slot_is_visible_to_next_invocation() {
+        let device = Device::default();
+        let slot: std::rc::Rc<std::cell::RefCell<StableInputs>> = std::rc::Rc::new(std::cell::RefCell::new(StableInputs {
+            input_ids: Tensor::<2, Int>::from_data(TensorData::new(vec![1i64, 2, 3, 4], [2, 2]), &device),
+            attention_mask: Tensor::<2, Int>::from_data(TensorData::new(vec![1i64, 1, 1, 1], [2, 2]), &device),
+            marker_pos: Tensor::<2, Int>::from_data(TensorData::new(vec![0i64, 1, 0, 1], [2, 2]), &device),
+            marker_mask: Tensor::<2, Int>::from_data(TensorData::new(vec![1i64, 1, 1, 1], [2, 2]), &device),
+            qtype: Tensor::<1, Int>::from_data(TensorData::new(vec![0i64, 0], [2]), &device),
+        }));
+        let fresh = StableInputs {
+            input_ids: Tensor::<2, Int>::from_data(TensorData::new(vec![9i64, 8, 7, 6], [2, 2]), &device),
+            attention_mask: Tensor::<2, Int>::from_data(TensorData::new(vec![0i64, 0, 0, 0], [2, 2]), &device),
+            marker_pos: Tensor::<2, Int>::from_data(TensorData::new(vec![2i64, 3, 2, 3], [2, 2]), &device),
+            marker_mask: Tensor::<2, Int>::from_data(TensorData::new(vec![0i64, 0, 0, 0], [2, 2]), &device),
+            qtype: Tensor::<1, Int>::from_data(TensorData::new(vec![2i64, 2], [2]), &device),
+        };
+        // Invocation-style transient clone, immediately dropped.
+        {
+            let view = slot.borrow().clone();
+            assert_eq!(view.input_ids.to_data().as_slice::<i32>().unwrap(), &[1, 2, 3, 4]);
+        }
+        slot.borrow_mut().refresh(fresh);
+        // The next invocation must observe the refreshed bytes.
+        let view = slot.borrow().clone();
+        assert_eq!(view.input_ids.to_data().as_slice::<i32>().unwrap(), &[9, 8, 7, 6]);
+        assert_eq!(view.qtype.to_data().as_slice::<i32>().unwrap(), &[2, 2]);
+    }
 }
 
 fn collate(seqs: &[(Vec<i64>, Vec<usize>, i64)], pad: i64, batch_len: usize, n_markers: usize) -> Batch {

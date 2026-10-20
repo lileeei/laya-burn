@@ -85,11 +85,27 @@ fn main() {
     // LAYA_BATCH=N repeats the question set N times in one forward (batch scaling probe).
     let reps: usize = std::env::var("LAYA_BATCH").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
     let big: Vec<_> = questions.iter().cycle().take(questions.len() * reps).cloned().collect();
-    let t1 = std::time::Instant::now();
-    let answers = agent.system_one(&device, &state, &big);
-    println!("inference ({} questions): {:.2?}", big.len(), t1.elapsed());
-    for (i, answer) in answers.iter().enumerate() {
-        println!("Q{i}: {answer:?}");
+
+    // LAYA_REPLAY=1 enables the per-shape graph capture/replay fast path
+    // (ReplayEngine). LAYA_REPLAY_N=k calls system_one k times with the SAME
+    // questions so one process exercises refresh+replay for the same shape
+    // (and doubles as a benchmark); default 1 keeps today's behavior.
+    let replay_on = std::env::var("LAYA_REPLAY").as_deref() == Ok("1");
+    let replay_n: usize =
+        std::env::var("LAYA_REPLAY_N").ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(1);
+    let mut engine = replay_on.then(|| agent.replay_engine(&device));
+    for run in 1..=replay_n {
+        let t1 = std::time::Instant::now();
+        let answers = agent.system_one(&device, &state, &big, engine.as_mut());
+        let label = if replay_n == 1 {
+            format!("inference ({} questions)", big.len())
+        } else {
+            format!("inference run {run}/{replay_n} ({} questions)", big.len())
+        };
+        println!("{label}: {:.2?}", t1.elapsed());
+        for (i, answer) in answers.iter().enumerate() {
+            println!("Q{i}: {answer:?}");
+        }
     }
 }
 

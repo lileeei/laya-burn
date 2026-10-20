@@ -265,14 +265,36 @@ impl HalfSplitRope {
 pub struct Ropes {
     pub full: HalfSplitRope,
     pub sliding: HalfSplitRope,
+    /// Precomputed input-independent masks over max_sequence_length:
+    /// bool [1,1,S,S] (true = masked by window) and additive float twin.
+    pub window_bool: Tensor<4, Bool>,
+    pub window_add: Tensor<4>,
 }
 
 impl Ropes {
     pub fn new(ecfg: &EncoderConfig, device: &Device) -> Self {
         let hd = ecfg.hidden_size / ecfg.num_heads;
+        let ms = ecfg.max_sequence_length;
+        let half_win = ecfg.window_size / 2;
+        let mut mb = Vec::with_capacity(ms * ms);
+        let mut mf = Vec::with_capacity(ms * ms);
+        for i in 0..ms {
+            for j in 0..ms {
+                let masked = (i as isize - j as isize).unsigned_abs() > half_win;
+                mb.push(masked);
+                mf.push(if masked { -1.0e9 } else { 0.0 });
+            }
+        }
         Self {
             full: HalfSplitRope::new(ecfg.max_sequence_length, hd, ecfg.rope_theta_full, device),
             sliding: HalfSplitRope::new(ecfg.max_sequence_length, hd, ecfg.rope_theta_sliding, device),
+            window_bool: Tensor::<2, Bool>::from_data(
+                burn::tensor::TensorData::new(mb, [ms, ms]),
+                device,
+            )
+            .reshape([1, 1, ms, ms]),
+            window_add: Tensor::<1>::from_floats(mf.as_slice(), device)
+                .reshape([1, 1, ms, ms]),
         }
     }
 }
@@ -438,63 +460,25 @@ impl Laya {
         // Masks are identical for every layer of one batch: build once, reuse
         // across the 28 encoder layers (the sliding-window mask is the same
         // bool tensor for all windowed layers).
-        let pad_rows_int = attention_mask
+        // Device-side mask composition (no host readback: keeps the forward
+        // capturable for graph replay). Window masks are input-independent and
+        // precomputed in Ropes over max_sequence_length; pad comes from the
+        // attention mask. bool_or needs matching shapes, so both sides are
+        // materialized to [B,1,S,S].
+        let window_add = ropes
+            .window_add
             .clone()
-            .to_data()
-            .as_slice::<i32>()
-            .unwrap()
-            .to_vec();
-        let window_add = if seq > self.window_size / 2 {
-            let mut m = vec![0.0f32; seq * seq];
-            for i in 0..seq {
-                for j in 0..seq {
-                    if (i as isize - j as isize).unsigned_abs() > self.window_size / 2 {
-                        m[i * seq + j] = -1.0e9;
-                    }
-                }
-            }
-            Some(
-                Tensor::<1>::from_floats(m.as_slice(), &device)
-                    .reshape([1, 1, seq, seq]),
-            )
-        } else {
-            None
-        };
-        let window_bool = if seq > self.window_size / 2 {
-            let mut data = Vec::with_capacity(batch * seq * seq);
-            for b in 0..batch {
-                for i in 0..seq {
-                    for j in 0..seq {
-                        let w = (i as isize - j as isize).unsigned_abs() > self.window_size / 2;
-                        data.push(w || pad_rows_int[b * seq + j] == 0);
-                    }
-                }
-            }
-            Some(
-                Tensor::<3, Bool>::from_data(
-                    burn::tensor::TensorData::new(data, [batch, seq, seq]),
-                    &device,
-                )
-                .reshape([batch, 1, seq, seq]),
-            )
-        } else {
-            // short sequences: every token is inside every window; pad mask only.
-            let mut data = Vec::with_capacity(batch * seq * seq);
-            for b in 0..batch {
-                for _i in 0..seq {
-                    for j in 0..seq {
-                        data.push(pad_rows_int[b * seq + j] == 0);
-                    }
-                }
-            }
-            Some(
-                Tensor::<3, Bool>::from_data(
-                    burn::tensor::TensorData::new(data, [batch, seq, seq]),
-                    &device,
-                )
-                .reshape([batch, 1, seq, seq]),
-            )
-        };
+            .slice([0..1, 0..1, 0..seq, 0..seq]);
+        let window_bool = ropes
+            .window_bool
+            .clone()
+            .slice([0..1, 0..1, 0..seq, 0..seq])
+            .repeat_dim(0, batch);
+        let pad_full = pad_bool
+            .clone()
+            .reshape([batch, 1, 1, seq])
+            .repeat_dim(2, seq);
+        let window_bool: Tensor<4, Bool> = window_bool.bool_or(pad_full);
 
         // ---- encoder ----
         let mut h = self.emb_norm.forward(self.tok_embeddings.forward(input_ids.clone()));
@@ -522,13 +506,11 @@ impl Laya {
             let amask = if use_manual {
                 let mut mask = pad_add.clone();
                 if !layer.is_global {
-                    if let Some(w) = &window_add {
-                        mask = mask + w.clone();
-                    }
+                    mask = mask + window_add.clone();
                 }
                 AttnMask::Manual(mask)
             } else if !layer.is_global {
-                AttnMask::Bool(window_bool.clone().unwrap())
+                AttnMask::Bool(window_bool.clone())
             } else {
                 AttnMask::Bool(pad_bool.clone())
             };
@@ -614,38 +596,42 @@ impl Laya {
     }
 }
 
-/// Host-side [top1, top1-top2, normalized entropy, k/255] features (tiny [B,M] tensors).
+/// Device-side [top1, top1-top2, normalized entropy, k/255] features.
+///
+/// Softmax is computed over ALL n marker columns instead of the per-row valid
+/// subsets: invalid markers carry the additive -1e4 mask applied in forward(),
+/// so their softmax mass is ~exp(-1e4) = 0 relative to typical logit scales.
+/// That makes top-2 over all columns match the valid-subset top-2 (and match
+/// the host version's top2 = 0.0 fallback when a row has a single valid
+/// marker), and the entropy contribution of ~0-mass entries stays ~0 because
+/// clamp_min(1e-9) bounds p*ln(p) at ~1e-4*ln(1e-9) there. No host readback.
 fn act_features(logits: &Tensor<2>, marker_mask: &Tensor<2, Int>, device: &Device) -> Tensor<2> {
-    let batch = logits.dims()[0];
-    let n = logits.dims()[1];
-    let ldata = logits.to_data().as_slice::<f32>().unwrap().to_vec();
-    let mdata = match marker_mask.to_data().as_slice::<i64>() {
-        Ok(v) => v.to_vec(),
-        Err(_) => marker_mask
-            .to_data()
-            .as_slice::<i32>()
-            .unwrap()
-            .iter()
-            .map(|&x| x as i64)
-            .collect(),
+    let [batch, n] = logits.dims();
+    let p = softmax(logits.clone(), 1);
+    // Top-1 via max + argmax; top-2 by masking the FIRST maximal position
+    // (argmax ties resolve to the lowest index, matching NumPy/torch topk
+    // semantics for tied values). Avoids sort: the backend-default sort
+    // implementation round-trips through the host, which breaks graph
+    // capture on wgpu/cubecl backends.
+    let (top1, top1_idx) = p.clone().max_dim_with_indices(1);
+    let top2 = if n >= 2 {
+        // Device-native one-hot via broadcast equality (Tensor::one_hot
+        // round-trips through the host, which breaks graph capture).
+        let js = Tensor::<1, Int>::arange(0..n as i64, device)
+            .reshape([1, n])
+            .repeat_dim(0, batch);
+        let onehot = js
+            .equal(top1_idx.clone().repeat_dim(1, n))
+            .float();
+        // p is in [0,1]; subtracting 2 at the first-max position pushes only
+        // that position below every other probability (ties keep their value).
+        (p.clone() - onehot * 2.0).max_dim(1)
+    } else {
+        Tensor::zeros([batch, 1], device)
     };
-    let mut feats = Vec::with_capacity(batch * 4);
-    for r in 0..batch {
-        let probs: Vec<f32> = (0..n)
-            .filter(|c| mdata[r * n + c] != 0)
-            .map(|c| ldata[r * n + c])
-            .collect();
-        let zmax = probs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let exp: Vec<f32> = probs.iter().map(|z| (z - zmax).exp()).collect();
-        let ssum: f32 = exp.iter().sum();
-        let p: Vec<f32> = exp.iter().map(|e| e / ssum).collect();
-        let mut sorted = p.clone();
-        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
-        let top1 = sorted[0];
-        let top2 = sorted.get(1).copied().unwrap_or(0.0);
-        let k = p.len().max(2) as f32;
-        let ent = -p.iter().map(|&x| x * x.max(1e-9).ln()).sum::<f32>() / k.ln();
-        feats.extend_from_slice(&[top1, top1 - top2, ent, k / 255.0]);
-    }
-    Tensor::<1>::from_floats(feats.as_slice(), device).reshape([batch, 4])
+    // k = max(valid_marker_count, 2)
+    let k = marker_mask.clone().float().sum_dim(1).clamp_min(2.0);
+    let pc = p.clamp_min(1e-9);
+    let ent = -(pc.clone() * pc.log()).sum_dim(1) / k.clone().log();
+    Tensor::cat(vec![top1.clone(), top1 - top2, ent, k / 255.0], 1)
 }
