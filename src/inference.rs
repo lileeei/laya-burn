@@ -23,6 +23,7 @@ pub struct RlAgent {
 }
 
 /// One question in the public API shape.
+#[derive(Clone)]
 pub struct QuestionInput {
     pub qtype: usize, // 0=choice 1=score 2=noul
     pub instructions: String,

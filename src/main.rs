@@ -82,9 +82,12 @@ fn main() {
         },
     ];
 
+    // LAYA_BATCH=N repeats the question set N times in one forward (batch scaling probe).
+    let reps: usize = std::env::var("LAYA_BATCH").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let big: Vec<_> = questions.iter().cycle().take(questions.len() * reps).cloned().collect();
     let t1 = std::time::Instant::now();
-    let answers = agent.system_one(&device, &state, &questions);
-    println!("inference ({} questions): {:.2?}", questions.len(), t1.elapsed());
+    let answers = agent.system_one(&device, &state, &big);
+    println!("inference ({} questions): {:.2?}", big.len(), t1.elapsed());
     for (i, answer) in answers.iter().enumerate() {
         println!("Q{i}: {answer:?}");
     }
