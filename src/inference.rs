@@ -3,7 +3,9 @@
 use burn::tensor::{Device, Int, Tensor};
 use serde_json::Value;
 
+use crate::calibration::Calibration;
 use crate::model::{EncoderConfig, Laya, Ropes};
+use crate::python_json::PythonJson;
 use crate::sequence::{build_sequence, Batch, Question};
 use crate::tokenizer::LayaTokenizer;
 use crate::weights::Weights;
@@ -14,8 +16,10 @@ pub struct RlAgent {
     pub tok: LayaTokenizer,
     pub max_len: usize,
     pub head_max_len: usize,
-    pub temperature: [f32; 3],
-    pub temperature_by_options: Vec<(String, f32)>,
+    pub temperature: [f64; 3],
+    pub temperature_by_options: Vec<(String, f64)>,
+    /// Buckets whose fitted temperature was clamped to [0.5, 5.0] at load.
+    pub clamped_temperatures: Vec<String>,
 }
 
 /// One question in the public API shape.
@@ -69,33 +73,53 @@ impl RlAgent {
                 .unwrap();
         let max_len = cfg["max_len"].as_u64().unwrap() as usize;
         let head_max_len = cfg["head_max_len"].as_u64().unwrap() as usize;
+        // Clamp every fitted temperature to [0.5, 5.0] (official SDK behavior, issue #42):
+        // a sub-0.5 temperature would sharpen logits and overstate confidence.
         let temperature = [
-            cfg["temperature"][0].as_f64().unwrap() as f32,
-            cfg["temperature"][1].as_f64().unwrap() as f32,
-            cfg["temperature"][2].as_f64().unwrap() as f32,
+            Calibration::clamp_temperature(cfg["temperature"][0].as_f64().unwrap_or(1.0)),
+            Calibration::clamp_temperature(cfg["temperature"][1].as_f64().unwrap_or(1.0)),
+            Calibration::clamp_temperature(cfg["temperature"][2].as_f64().unwrap_or(1.0)),
         ];
-        let temperature_by_options = cfg["temperature_by_options"]
+        let temperature_by_options: Vec<(String, f64)> = cfg["temperature_by_options"]
             .as_object()
             .map(|m| {
                 m.iter()
-                    .map(|(k, v)| (k.clone(), v.as_f64().unwrap() as f32))
+                    .map(|(k, v)| {
+                        let raw = v.as_f64().unwrap_or(1.0);
+                        (k.clone(), Calibration::clamp_temperature(raw))
+                    })
                     .collect()
             })
             .unwrap_or_default();
+        let mut clamped_temperatures = Vec::new();
+        if let Some(m) = cfg["temperature_by_options"].as_object() {
+            for (k, v) in m {
+                let raw = v.as_f64().unwrap_or(1.0);
+                if Calibration::clamp_temperature(raw) != raw {
+                    clamped_temperatures.push(format!("{k}={raw}"));
+                }
+            }
+        }
+        for (i, t) in cfg["temperature"].as_array().unwrap_or(&vec![]).iter().enumerate().take(3) {
+            let raw = t.as_f64().unwrap_or(1.0);
+            if Calibration::clamp_temperature(raw) != raw {
+                clamped_temperatures.push(format!("temperature[{i}]={raw}"));
+            }
+        }
+        if !clamped_temperatures.is_empty() {
+            eprintln!("clamped temperatures: {clamped_temperatures:?}");
+        }
 
         let ecfg = EncoderConfig::laya();
         let model = Laya::load(&w, &ecfg, 2, device);
         let ropes = Ropes::new(&ecfg, device);
         let tok = LayaTokenizer::load(&format!("{model_dir}/tokenizer/tokenizer.json"));
-        Self { model, ropes, tok, max_len, head_max_len, temperature, temperature_by_options }
+        Self { model, ropes, tok, max_len, head_max_len, temperature, temperature_by_options, clamped_temperatures }
     }
 
     /// state + questions -> typed answers, one forward pass for the whole batch.
     pub fn system_one(&self, device: &Device, state: &Value, questions: &[QuestionInput]) -> Vec<Answer> {
-        let state_str = match state {
-            Value::String(s) => s.clone(),
-            v => serde_json::to_string(v).unwrap(),
-        };
+        let state_str = PythonJson::state(state);
 
         let mut seqs = Vec::new();
         for q in questions {
@@ -133,43 +157,34 @@ impl RlAgent {
         );
 
         let logits = logits.to_data().as_slice::<f32>().unwrap().to_vec();
-        let act = softmax_host(
-            &act_logits.to_data().as_slice::<f32>().unwrap().to_vec()[..2.min(questions.len()) * 2],
-        );
+        let act_row = act_logits.to_data().as_slice::<f32>().unwrap().to_vec();
+        let act = Calibration::softmax(&act_row[..2]);
 
         let mut answers = Vec::new();
         for (r, q) in questions.iter().enumerate() {
             let k = seqs[r].1.len();
-            let bucket = temp_bucket(q.qtype, k);
+            let bucket = Calibration::temp_bucket(q.qtype, k);
             let temp = self
                 .temperature_by_options
                 .iter()
                 .find(|(key, _)| *key == bucket)
                 .map(|&(_, t)| t)
                 .unwrap_or(self.temperature[q.qtype]);
-            let z: Vec<f32> = (0..k).map(|c| logits[r * n_markers + c] / temp).collect();
-            let p = softmax_host(&z);
+            let z: Vec<f32> = (0..k).map(|c| logits[r * n_markers + c]).collect();
+            let p = Calibration::probabilities(&z, k, temp);
             let answer = match q.qtype {
                 0 => Answer::Choice {
-                    index: p
-                        .iter()
-                        .enumerate()
-                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                        .map(|(i, _)| i)
-                        .unwrap(),
-                    probabilities: round4(&p),
-                    confidence: (confidence_from_probs(&p) * 10000.0).round() / 10000.0,
+                    index: Calibration::arg_max(&p),
+                    probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
+                    confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
                 },
                 1 => Answer::Score {
-                    score: (p.iter().enumerate().map(|(i, &v)| i as f32 * v).sum::<f32>()
-                        * 10000.0)
-                        .round()
-                        / 10000.0,
-                    probabilities: round4(&p),
-                    confidence: (confidence_from_probs(&p) * 10000.0).round() / 10000.0,
+                    score: Calibration::round4(Calibration::expected_score(&p)) as f32,
+                    probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
+                    confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
                 },
                 _ => Answer::Noul {
-                    prob: (p[1] * 10000.0).round() / 10000.0,
+                    prob: Calibration::round4(p[1]) as f32,
                 },
             };
             let _ = act;
@@ -178,6 +193,8 @@ impl RlAgent {
         answers
     }
 }
+
+
 
 fn t2i(rows: Vec<Vec<i64>>, cols: usize, device: &Device) -> Tensor<2, Int> {
     let n_rows = rows.len();
@@ -188,17 +205,6 @@ fn t2i(rows: Vec<Vec<i64>>, cols: usize, device: &Device) -> Tensor<2, Int> {
 fn t1i(v: Vec<i64>, device: &Device) -> Tensor<1, Int> {
     let n = v.len();
     Tensor::<1, Int>::from_data(burn::tensor::TensorData::new(v, [n]), device)
-}
-
-fn round4(p: &[f32]) -> Vec<f32> {
-    p.iter().map(|v| (v * 10000.0).round() / 10000.0).collect()
-}
-
-fn softmax_host(z: &[f32]) -> Vec<f32> {
-    let zmax = z.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let exp: Vec<f32> = z.iter().map(|v| (v - zmax).exp()).collect();
-    let s: f32 = exp.iter().sum();
-    exp.into_iter().map(|e| e / s).collect()
 }
 
 fn collate(seqs: &[(Vec<i64>, Vec<usize>, i64)], pad: i64, batch_len: usize, n_markers: usize) -> Batch {

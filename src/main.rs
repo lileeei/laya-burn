@@ -1,8 +1,10 @@
 //! Demo: run the real Laya checkpoint on typed questions.
 
+mod calibration;
 mod inference;
 mod model;
 mod sequence;
+mod python_json;
 mod tokenizer;
 mod weights;
 
@@ -80,5 +82,19 @@ fn main() {
     println!("inference ({} questions): {:.2?}", questions.len(), t1.elapsed());
     for (i, answer) in answers.iter().enumerate() {
         println!("Q{i}: {answer:?}");
+    }
+}
+
+#[cfg(test)]
+mod pyjson_tests {
+    use crate::python_json::PythonJson;
+    use serde_json::json;
+
+    #[test]
+    fn state_matches_expected_python_dumps() {
+        let v = json!({"b": 1, "a": [2.5, null, "x"]});
+        // json.dumps(..., ensure_ascii=False, separators=(", ", ": ")) with insertion order
+        assert_eq!(PythonJson::state(&v), "{\"b\": 1, \"a\": [2.5, null, \"x\"]}");
+        assert_eq!(PythonJson::state(&json!("plain")), "plain");
     }
 }

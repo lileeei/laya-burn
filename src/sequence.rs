@@ -26,6 +26,20 @@ pub fn build_sequence(
     max_len: usize,
     head_max_len: usize,
 ) -> (Vec<i64>, Vec<usize>) {
+    build_sequence_ex(tok, state, q, max_len, head_max_len, false)
+}
+
+/// truncate_left keeps the END of an over-long state (conversation-turn lists are serialized
+/// newest-last, so right-truncation would drop the newest turn). Official SDK sets it for
+/// JSON-array states.
+pub fn build_sequence_ex(
+    tok: &LayaTokenizer,
+    state: &str,
+    q: &Question,
+    max_len: usize,
+    head_max_len: usize,
+    truncate_left: bool,
+) -> (Vec<i64>, Vec<usize>) {
     let opts = render_options(q);
     let ins = q.instructions.replace("<mask>", " ");
     let head_ids = tok.encode(&format!("{} question: {}", QTYPES[q.qtype], ins));
@@ -58,7 +72,12 @@ pub fn build_sequence(
     ids.push(tok.sep_token_id);
     let room = max_len.saturating_sub(ids.len() + 1);
     let st = tok.encode(&state.replace("<mask>", " "));
-    let st: Vec<i64> = st.into_iter().take(room).collect();
+    let st: Vec<i64> = if truncate_left {
+        let skip = st.len().saturating_sub(room);
+        st.into_iter().skip(skip).collect()
+    } else {
+        st.into_iter().take(room).collect()
+    };
     ids.extend(st);
     ids.push(tok.sep_token_id);
     ids.truncate(max_len);

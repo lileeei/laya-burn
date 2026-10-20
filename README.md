@@ -73,6 +73,23 @@ The parity hunt fixed four real bugs, all invisible to the earlier A/B heuristic
 3. Layer 0 skipped mlp_norm; only attn_norm is Identity there.
 4. Sliding layers ran global attention when seq_len <= window (mask guard).
 
+## Components absorbed from the official SDK
+
+Cross-reviewed against [NandhaKishorM/laya](https://github.com/NandhaKishorM/laya)
+(`laya-rust/`, Apache-2.0); the following were ported in and adapted:
+
+- `src/calibration.rs` — temperature clamp to [0.5, 5.0] (official issue #42: a fitted
+  0.1 bucket sharpened logits and overstated confidence), f64-precision tempered softmax,
+  `answer_confidence` (max-probability, the calibrated quantity), Python round-half-even
+  `round4`, expected-score readout.
+- `src/python_json.rs` — byte-for-byte `json.dumps(ensure_ascii=False)` serialization, so
+  dict states tokenize identically to the Python SDK (fixes the key-order/spacing divergence
+  found during parity testing).
+- `sequence::build_sequence_ex` — `truncate_left` (conversation lists keep the newest
+  turns) per the official sequence builder.
+
+Logits-level parity is unaffected by these readout changes (verified: still PASS).
+
 ## Status / caveats
 
 - [x] End-to-end inference with real weights on the flex CPU backend
