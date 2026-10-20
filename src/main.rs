@@ -8,7 +8,6 @@ mod weights;
 
 use burn::tensor::Device;
 use inference::{QuestionInput, RlAgent};
-use serde_json::json;
 
 fn pick_device() -> Device {
     match std::env::var("LAYA_DEVICE").as_deref() {
@@ -26,11 +25,7 @@ fn main() {
     let agent = RlAgent::load(&model_dir, &device);
     println!("model loaded in {:.2?}", t0.elapsed());
 
-    let state = json!({
-        "task": "Demo of laya-burn",
-        "context": "The user is deciding whether to run a 421M non-autoregressive decision model in Rust.",
-        "facts": ["Burn is a Rust tensor framework", "A checkpoint is available"]
-    });
+    let state = serde_json::Value::String("The user is deciding whether to run a 421M non-autoregressive decision model in Rust. Facts: Burn is a Rust tensor framework; a checkpoint is available.".to_string());
 
     let questions = vec![
         // choice with 12 options -> temperature bucket "choice:11+" = 0.1 (sharp):

@@ -113,6 +113,16 @@ impl RlAgent {
         let n_markers: usize = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
         let b = collate(&seqs, self.tok.pad_token_id, batch_len, n_markers);
 
+        if let Ok(dir) = std::env::var("LAYA_DUMP_DIR") {
+            let _ = std::fs::create_dir_all(&dir);
+            let rows: Vec<String> = b
+                .input_ids
+                .iter()
+                .map(|r| r.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
+                .collect();
+            let _ = std::fs::write(format!("{dir}/all_rows.txt"), rows.join("
+"));
+        }
         let (logits, act_logits) = self.model.forward(
             t2i(b.input_ids, batch_len, device),
             t2i(b.attention_mask, batch_len, device),

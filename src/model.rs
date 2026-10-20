@@ -8,6 +8,37 @@ use burn::tensor::{Device, Int, Tensor};
 
 use crate::weights::Weights;
 
+/// Write a float tensor as little-endian f32 with a .shape sidecar when LAYA_DUMP_DIR is set.
+pub fn dump_tensor<const D: usize>(name: &str, t: &Tensor<D>) {
+    let Ok(dir) = std::env::var("LAYA_DUMP_DIR") else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let vals = t.to_data().as_slice::<f32>().unwrap_or(&[]).to_vec();
+    let mut bytes = Vec::with_capacity(vals.len() * 4);
+    for v in vals {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    let _ = std::fs::write(format!("{dir}/{name}.f32"), bytes);
+    let _ = std::fs::write(format!("{dir}/{name}.shape"), format!("{:?}", t.dims()));
+}
+
+/// Write an int tensor as text lines when LAYA_DUMP_DIR is set.
+pub fn dump_ids<const D: usize>(name: &str, t: &Tensor<D, Int>) {
+    let Ok(dir) = std::env::var("LAYA_DUMP_DIR") else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let text = match t.to_data().as_slice::<i64>() {
+        Ok(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","),
+        Err(_) => t
+            .to_data()
+            .as_slice::<i32>()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    };
+    let _ = std::fs::write(format!("{dir}/{name}.txt"), text);
+}
+
 /// Encoder (ModernBERT-large) hyperparameters from encoder/config.json.
 pub struct EncoderConfig {
     pub hidden_size: usize,
@@ -221,7 +252,7 @@ impl HalfSplitRope {
         let out = Tensor::cat(
             vec![
                 q1.clone() * cos.clone() - q2.clone() * sin.clone(),
-                q2 * cos - q1 * sin,
+                q2 * cos + q1 * sin,
             ],
             2,
         );
@@ -288,7 +319,7 @@ impl Laya {
                     attn_norm: (!first).then(|| norm_no_bias(w, &format!("{p}.attn_norm"), ecfg, device)),
                     wqkv: linear(w, &format!("{p}.attn.Wqkv"), device),
                     attn_out: linear(w, &format!("{p}.attn.Wo"), device),
-                    mlp_norm: (!first).then(|| norm_no_bias(w, &format!("{p}.mlp_norm"), ecfg, device)),
+                    mlp_norm: Some(norm_no_bias(w, &format!("{p}.mlp_norm"), ecfg, device)),
                     wi: linear(w, &format!("{p}.mlp.Wi"), device),
                     mlp_out: linear(w, &format!("{p}.mlp.Wo"), device),
                     is_global: i % ecfg.global_every == 0,
@@ -372,8 +403,11 @@ impl Laya {
         };
 
         // ---- encoder ----
-        let mut h = self.emb_norm.forward(self.tok_embeddings.forward(input_ids));
-        for layer in &self.layers {
+        let mut h = self.emb_norm.forward(self.tok_embeddings.forward(input_ids.clone()));
+        dump_tensor("emb_out", &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
+        dump_ids("input_ids", &input_ids.clone().slice([0..1, 0..seq]));
+        for (li, layer) in self.layers.iter().enumerate() {
+            let _ = li;
             let x1 = match &layer.attn_norm {
                 Some(n) => n.forward(h.clone()),
                 None => h.clone(),
@@ -386,13 +420,17 @@ impl Laya {
             } else {
                 (rope.forward(q), rope.forward(k))
             };
+            if li == 0 {
+                {
+            }
+            }
 
             let mut mask = pad_add.clone();
-            if !layer.is_global && seq > self.window_size {
+            if !layer.is_global {
                 let mut m = vec![0.0f32; seq * seq];
                 for i in 0..seq {
                     for j in 0..seq {
-                        if (i as isize - j as isize).unsigned_abs() >= self.window_size {
+                        if (i as isize - j as isize).unsigned_abs() > self.window_size / 2 {
                             m[i * seq + j] = -1.0e9;
                         }
                     }
@@ -401,7 +439,9 @@ impl Laya {
                     + Tensor::<1>::from_floats(m.as_slice(), &device)
                         .reshape([1, 1, seq, seq]);
             }
-            let h2 = h + layer.attn_out.forward(attention(q, k, v, n_heads, &mask));
+            let attn_res = attention(q, k, v, n_heads, &mask);
+            let attn_mod_out = layer.attn_out.forward(attn_res);
+            let h2 = h + attn_mod_out;
 
             let x2 = match &layer.mlp_norm {
                 Some(n) => n.forward(h2.clone()),
@@ -417,8 +457,12 @@ impl Laya {
                 gelu(a) * b
             };
             h = h2 + layer.mlp_out.forward(mlp);
+            if li == 0 || li == 1 || li == self.layers.len() - 1 {
+                dump_tensor(&format!("enc_layer_{li}"), &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
+            }
         }
         let mut h = self.final_norm.forward(h);
+        dump_tensor("encoder_out", &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
 
         // ---- typed decision head ----
         h = h + self
@@ -435,6 +479,8 @@ impl Laya {
             let h2 = h + hl.out_proj.forward(attention(q, k, v, n_heads, &pad_add3));
             h = h2.clone() + hl.linear2.forward(relu(hl.linear1.forward(hl.norm2.forward(h2))));
         }
+
+        dump_tensor("head_out", &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
 
         // gather marker positions -> [B,M,d]
         let n_markers = marker_pos.dims()[1];
@@ -457,6 +503,13 @@ impl Laya {
         let act_logits = self
             .act_fc2
             .forward(gelu(self.act_fc1.forward(Tensor::cat(vec![pooled, feats], 1))));
+
+        let mut lg = logits.clone().slice([0..1, 0..n_markers]).reshape([1, n_markers]);
+        dump_tensor("logits", &lg.clone());
+        lg = lg.slice([0..1, 0..n_markers]).reshape([1, n_markers]);
+        let _ = lg;
+        let ag = act_logits.clone().slice([0..1, 0..2]);
+        dump_tensor("act_logits", &ag);
 
         (logits, act_logits)
     }

@@ -49,12 +49,35 @@ distributions — near-uniform outputs there match the shipped calibration.
 - `LAYA_ROPE=interleaved` — use GPT-J style interleaved RoPE (kept for A/B testing)
 - `LAYA_MLP=swap` — swap MLP gate order (kept for A/B testing)
 
+## Parity testing
+
+`parity/` contains a test harness against the official PyTorch implementation:
+
+```sh
+# rust side: dump intermediates
+LAYA_DUMP_DIR=parity/rust_out cargo run --release
+# reference side (needs: pip3 install torch transformers safetensors)
+python3 parity/run_ref.py
+# compare
+python3 parity/compare.py parity/rust_out parity/ref_out
+```
+
+Latest result: **PASS** — every stage (embedding, encoder layers 0/1/27, final
+encoder output, decision head, option logits, act logits) matches the reference
+within relative error 1e-5 to 2e-4 (F16->F32 weight conversion noise).
+
+The parity hunt fixed four real bugs, all invisible to the earlier A/B heuristics:
+
+1. RoPE second half used `- q1*sin` instead of `+ q1*sin` (sign error).
+2. Sliding window mask was `|i-j| < 128`; ModernBERT uses `|i-j| <= 64`.
+3. Layer 0 skipped mlp_norm; only attn_norm is Identity there.
+4. Sliding layers ran global attention when seq_len <= window (mask guard).
+
 ## Status / caveats
 
 - [x] End-to-end inference with real weights on the flex CPU backend
 - [x] All 206 checkpoint tensors mapped and loaded
-- [ ] Bit-exact parity test against the PyTorch reference (needs a torch env;
-      the A/B experiments above are strong but indirect evidence)
+- [x] Parity vs the PyTorch reference: PASS (see "Parity testing")
 - [ ] Performance tuning (dense-mask sliding attention, batch inference, quantization)
 
 ## macOS performance
