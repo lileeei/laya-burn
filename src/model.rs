@@ -4,9 +4,9 @@
 use burn::module::{Module, Param, ParamId, ParameterValue};
 use burn::nn::{Embedding, LayerNorm, LayerNormConfig, Linear};
 use burn::tensor::activation::{gelu, relu, softmax};
-use burn::tensor::{Bool, Device, Int, Tensor, module};
+use burn::tensor::{Bool, Device, FloatDType, Int, Tensor, module};
 
-use crate::weights::Weights;
+use crate::weights::{Weights, compute_dtype};
 
 /// Write a float tensor as little-endian f32 with a .shape sidecar when LAYA_DUMP_DIR is set.
 pub fn dump_tensor<const D: usize>(name: &str, t: &Tensor<D>) {
@@ -191,11 +191,12 @@ impl HalfSplitRope {
                 sin_pair.push(sin[pos * half + i]);
             }
         }
+        let dt = compute_dtype();
         Self {
-            cos: Tensor::<1>::from_floats(cos.as_slice(), device).reshape([max_seq, half]),
-            sin: Tensor::<1>::from_floats(sin.as_slice(), device).reshape([max_seq, half]),
-            cos_pair: Tensor::<1>::from_floats(cos_pair.as_slice(), device).reshape([max_seq, head_dim]),
-            sin_pair: Tensor::<1>::from_floats(sin_pair.as_slice(), device).reshape([max_seq, head_dim]),
+            cos: Tensor::<1>::from_floats(cos.as_slice(), device).reshape([max_seq, half]).cast(dt),
+            sin: Tensor::<1>::from_floats(sin.as_slice(), device).reshape([max_seq, half]).cast(dt),
+            cos_pair: Tensor::<1>::from_floats(cos_pair.as_slice(), device).reshape([max_seq, head_dim]).cast(dt),
+            sin_pair: Tensor::<1>::from_floats(sin_pair.as_slice(), device).reshape([max_seq, head_dim]).cast(dt),
             head_dim,
         }
     }
@@ -294,7 +295,8 @@ impl Ropes {
             )
             .reshape([1, 1, ms, ms]),
             window_add: Tensor::<1>::from_floats(mf.as_slice(), device)
-                .reshape([1, 1, ms, ms]),
+                .reshape([1, 1, ms, ms])
+                .cast(compute_dtype()),
         }
     }
 }
@@ -450,7 +452,11 @@ impl Laya {
 
         // Additive padding mask [B,1,1,S]: 0 where the key is a real token.
         let pad_add = {
-            let m = attention_mask.clone().float().reshape([batch, 1, 1, seq]);
+            let m = attention_mask
+                .clone()
+                .float()
+                .cast(compute_dtype())
+                .reshape([batch, 1, 1, seq]);
             (m - 1.0) * 1.0e9
         };
 
@@ -546,7 +552,11 @@ impl Laya {
             .reshape([batch, 1, d]);
 
         let pad_add3 = {
-            let m = attention_mask.clone().float().reshape([batch, 1, 1, seq]);
+            let m = attention_mask
+                .clone()
+                .float()
+                .cast(compute_dtype())
+                .reshape([batch, 1, 1, seq]);
             (m - 1.0) * 1.0e9
         };
         let pad_bool3 = attention_mask.equal_scalar(0).reshape([batch, 1, 1, seq]);
@@ -576,7 +586,7 @@ impl Laya {
             .scorer_fc2
             .forward(gelu(self.scorer_fc1.forward(self.scorer_norm.forward(m))))
             .reshape([batch, n_markers]);
-        logits = logits + (marker_mask.clone().float() - 1.0) * 1.0e4;
+        logits = logits + ((marker_mask.clone().float() - 1.0) * 1.0e4).cast(compute_dtype());
 
         // act head: pooled CLS + detached answer-distribution features
         let pooled = h.slice([0..batch, 0..1, 0..d]).reshape([batch, d]);
@@ -591,6 +601,9 @@ impl Laya {
         let _ = lg;
         let ag = act_logits.clone().slice([0..1, 0..2]);
         dump_tensor("act_logits", &ag);
+
+        let logits = logits.cast(FloatDType::F32);
+        let act_logits = act_logits.cast(FloatDType::F32);
 
         (logits, act_logits)
     }
@@ -607,6 +620,10 @@ impl Laya {
 /// clamp_min(1e-9) bounds p*ln(p) at ~1e-4*ln(1e-9) there. No host readback.
 fn act_features(logits: &Tensor<2>, marker_mask: &Tensor<2, Int>, device: &Device) -> Tensor<2> {
     let [batch, n] = logits.dims();
+    // Compute in F32 regardless of the compute dtype: several ops here mint
+    // fresh F32 tensors (zeros, one-hot equality, scalar constants), and
+    // mixing dtypes trips the fusion IR. The result is cast back below.
+    let logits = &logits.clone().cast(FloatDType::F32);
     let p = softmax(logits.clone(), 1);
     // Top-1 via max + argmax; top-2 by masking the FIRST maximal position
     // (argmax ties resolve to the lowest index, matching NumPy/torch topk
@@ -633,5 +650,5 @@ fn act_features(logits: &Tensor<2>, marker_mask: &Tensor<2, Int>, device: &Devic
     let k = marker_mask.clone().float().sum_dim(1).clamp_min(2.0);
     let pc = p.clamp_min(1e-9);
     let ent = -(pc.clone() * pc.log()).sum_dim(1) / k.clone().log();
-    Tensor::cat(vec![top1.clone(), top1 - top2, ent, k / 255.0], 1)
+    Tensor::cat(vec![top1.clone(), top1 - top2, ent, k / 255.0], 1).cast(compute_dtype())
 }

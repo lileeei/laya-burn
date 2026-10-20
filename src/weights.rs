@@ -1,6 +1,16 @@
 //! Load Laya checkpoint tensors from a safetensors file into Burn tensors.
 
-use burn::tensor::{Device, Tensor, TensorData};
+use burn::tensor::{Device, FloatDType, Tensor, TensorData};
+
+/// Compute dtype for loaded weights: LAYA_DTYPE=bf16 selects BF16 compute,
+/// anything else stays F32 (the parity-verified default).
+pub fn compute_dtype() -> FloatDType {
+    match std::env::var("LAYA_DTYPE").as_deref() {
+        Ok("bf16") => FloatDType::BF16,
+        Ok("f16") => FloatDType::F16,
+        _ => FloatDType::F32,
+    }
+}
 use safetensors::SafeTensors;
 
 /// A safetensors file held in memory with lazy tensor views.
@@ -70,16 +80,18 @@ impl Weights {
         (out, shape)
     }
 
-    /// 1-D tensor as stored.
+    /// 1-D tensor as stored, cast to the compute dtype.
     pub fn t1(&self, name: &str, device: &Device) -> Tensor<1> {
         let (data, shape) = self.data_f32(name);
-        Tensor::from_data(TensorData::new(data, shape), device)
+        let t: Tensor<1> = Tensor::from_data(TensorData::new(data, shape), device);
+        t.cast(compute_dtype())
     }
 
-    /// 2-D tensor as stored (PyTorch [out, in] orientation).
+    /// 2-D tensor as stored (PyTorch [out, in] orientation), cast to the compute dtype.
     pub fn t2(&self, name: &str, device: &Device) -> Tensor<2> {
         let (data, shape) = self.data_f32(name);
-        Tensor::from_data(TensorData::new(data, shape), device)
+        let t: Tensor<2> = Tensor::from_data(TensorData::new(data, shape), device);
+        t.cast(compute_dtype())
     }
 
     pub fn has(&self, name: &str) -> bool {
