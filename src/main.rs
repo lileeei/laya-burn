@@ -27,7 +27,12 @@ fn main() {
     let agent = RlAgent::load(&model_dir, &device);
     println!("model loaded in {:.2?}", t0.elapsed());
 
-    let state = serde_json::Value::String("The user is deciding whether to run a 421M non-autoregressive decision model in Rust. Facts: Burn is a Rust tensor framework; a checkpoint is available.".to_string());
+    // LAYA_LONG=1 repeats the state to ~1000 tokens to benchmark long sequences.
+    let mut state_text = "The user is deciding whether to run a 421M non-autoregressive decision model in Rust. Facts: Burn is a Rust tensor framework; a checkpoint is available.".to_string();
+    if std::env::var("LAYA_LONG").is_ok() {
+        state_text = state_text.repeat(20);
+    }
+    let state = serde_json::Value::String(state_text);
 
     let questions = vec![
         // choice with 12 options -> temperature bucket "choice:11+" = 0.1 (sharp):

@@ -4,7 +4,7 @@
 use burn::module::{Module, Param, ParamId, ParameterValue};
 use burn::nn::{Embedding, LayerNorm, LayerNormConfig, Linear};
 use burn::tensor::activation::{gelu, relu, softmax};
-use burn::tensor::{Device, Int, Tensor};
+use burn::tensor::{Bool, Device, Int, Tensor, module};
 
 use crate::weights::Weights;
 
@@ -278,16 +278,46 @@ impl Ropes {
 }
 
 /// Attention over one layer's q/k/v with additive mask.
+enum AttnMask {
+    Manual(Tensor<4>),      // additive float mask (fallback comparison path)
+    Bool(Tensor<4, Bool>),  // boolean mask for the fused module::attention kernel
+    None,
+}
+
 fn attention(
     q: Tensor<4>,
     k: Tensor<4>,
     v: Tensor<4>,
     n_heads: usize,
-    mask_add: &Tensor<4>,
+    mask: &AttnMask,
 ) -> Tensor<3> {
     let [batch, _h, seq, _d] = q.dims();
     let head_dim = q.dims()[3];
-    let scores = q.matmul(k.transpose()) / (head_dim as f32).sqrt() + mask_add.clone();
+    if std::env::var("LAYA_ATTN").as_deref() != Ok("manual") {
+        let (m, bias) = match mask {
+            AttnMask::Bool(b) => (Some(b.clone()), None),
+            AttnMask::Manual(add) => (None, Some(add.clone())), // additive as bias: same softmax result
+            AttnMask::None => (None, None),
+        };
+        let out = module::attention(
+            q.clone(),
+            k.clone(),
+            v.clone(),
+            m,
+            bias,
+            burn::tensor::ops::AttentionModuleOptions::default(),
+        );
+        return out.swap_dims(1, 2).reshape([batch, seq, n_heads * head_dim]);
+    }
+    let add = match mask {
+        AttnMask::Manual(add) => add.clone(),
+        AttnMask::Bool(_) => panic!("bool mask on manual attention path"),
+        AttnMask::None => {
+            let z = Tensor::<1>::from_floats([0.0], &q.device());
+            z.reshape([1, 1, 1, 1]).repeat_dim(2, seq).repeat_dim(3, seq)
+        }
+    };
+    let scores = q.matmul(k.transpose()) / (head_dim as f32).sqrt() + add;
     softmax(scores, 3)
         .matmul(v)
         .swap_dims(1, 2)
@@ -402,6 +432,9 @@ impl Laya {
             (m - 1.0) * 1.0e9
         };
 
+        let use_manual = std::env::var("LAYA_ATTN").as_deref() == Ok("manual");
+        let pad_bool = attention_mask.clone().equal_scalar(0).reshape([batch, 1, 1, seq]);
+
         // ---- encoder ----
         let mut h = self.emb_norm.forward(self.tok_embeddings.forward(input_ids.clone()));
         dump_tensor("emb_out", &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
@@ -426,20 +459,49 @@ impl Laya {
             }
 
             let mut mask = pad_add.clone();
+            let mut mask_bool = pad_bool.clone();
             if !layer.is_global {
                 let mut m = vec![0.0f32; seq * seq];
+                let mut mb = vec![false; seq * seq];
                 for i in 0..seq {
                     for j in 0..seq {
                         if (i as isize - j as isize).unsigned_abs() > self.window_size / 2 {
                             m[i * seq + j] = -1.0e9;
+                            mb[i * seq + j] = true;
                         }
                     }
                 }
                 mask = mask
                     + Tensor::<1>::from_floats(m.as_slice(), &device)
                         .reshape([1, 1, seq, seq]);
+                let pad_rows = attention_mask
+                    .clone()
+                    .to_data()
+                    .as_slice::<i32>()
+                    .unwrap()
+                    .to_vec();
+                let mut data = Vec::with_capacity(batch * seq * seq);
+                for b in 0..batch {
+                    for i in 0..seq {
+                        for j in 0..seq {
+                            data.push(mb[i * seq + j] || pad_rows[b * seq + j] == 0);
+                        }
+                    }
+                }
+                mask_bool = Tensor::<3, Bool>::from_data(
+                    burn::tensor::TensorData::new(data, [batch, seq, seq]),
+                    &device,
+                )
+                .reshape([batch, 1, seq, seq]);
             }
-            let attn_res = attention(q, k, v, n_heads, &mask);
+            let amask = if use_manual {
+                AttnMask::Manual(mask)
+            } else if !layer.is_global {
+                AttnMask::Bool(mask_bool)
+            } else {
+                AttnMask::Bool(pad_bool.clone())
+            };
+            let attn_res = attention(q, k, v, n_heads, &amask);
             let attn_mod_out = layer.attn_out.forward(attn_res);
             let h2 = h + attn_mod_out;
 
@@ -474,9 +536,15 @@ impl Laya {
             let m = attention_mask.clone().float().reshape([batch, 1, 1, seq]);
             (m - 1.0) * 1.0e9
         };
+        let pad_bool3 = attention_mask.equal_scalar(0).reshape([batch, 1, 1, seq]);
         for hl in &self.head_layers {
             let (q, k, v) = split_qkv(hl.in_proj.forward(hl.norm1.forward(h.clone())), d, n_heads);
-            let h2 = h + hl.out_proj.forward(attention(q, k, v, n_heads, &pad_add3));
+            let amask3 = if use_manual {
+                AttnMask::Manual(pad_add3.clone())
+            } else {
+                AttnMask::Bool(pad_bool3.clone())
+            };
+            let h2 = h + hl.out_proj.forward(attention(q, k, v, n_heads, &amask3));
             h = h2.clone() + hl.linear2.forward(relu(hl.linear1.forward(hl.norm2.forward(h2))));
         }
 
