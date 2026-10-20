@@ -435,6 +435,67 @@ impl Laya {
         let use_manual = std::env::var("LAYA_ATTN").as_deref() == Ok("manual");
         let pad_bool = attention_mask.clone().equal_scalar(0).reshape([batch, 1, 1, seq]);
 
+        // Masks are identical for every layer of one batch: build once, reuse
+        // across the 28 encoder layers (the sliding-window mask is the same
+        // bool tensor for all windowed layers).
+        let pad_rows_int = attention_mask
+            .clone()
+            .to_data()
+            .as_slice::<i32>()
+            .unwrap()
+            .to_vec();
+        let window_add = if seq > self.window_size / 2 {
+            let mut m = vec![0.0f32; seq * seq];
+            for i in 0..seq {
+                for j in 0..seq {
+                    if (i as isize - j as isize).unsigned_abs() > self.window_size / 2 {
+                        m[i * seq + j] = -1.0e9;
+                    }
+                }
+            }
+            Some(
+                Tensor::<1>::from_floats(m.as_slice(), &device)
+                    .reshape([1, 1, seq, seq]),
+            )
+        } else {
+            None
+        };
+        let window_bool = if seq > self.window_size / 2 {
+            let mut data = Vec::with_capacity(batch * seq * seq);
+            for b in 0..batch {
+                for i in 0..seq {
+                    for j in 0..seq {
+                        let w = (i as isize - j as isize).unsigned_abs() > self.window_size / 2;
+                        data.push(w || pad_rows_int[b * seq + j] == 0);
+                    }
+                }
+            }
+            Some(
+                Tensor::<3, Bool>::from_data(
+                    burn::tensor::TensorData::new(data, [batch, seq, seq]),
+                    &device,
+                )
+                .reshape([batch, 1, seq, seq]),
+            )
+        } else {
+            // short sequences: every token is inside every window; pad mask only.
+            let mut data = Vec::with_capacity(batch * seq * seq);
+            for b in 0..batch {
+                for _i in 0..seq {
+                    for j in 0..seq {
+                        data.push(pad_rows_int[b * seq + j] == 0);
+                    }
+                }
+            }
+            Some(
+                Tensor::<3, Bool>::from_data(
+                    burn::tensor::TensorData::new(data, [batch, seq, seq]),
+                    &device,
+                )
+                .reshape([batch, 1, seq, seq]),
+            )
+        };
+
         // ---- encoder ----
         let mut h = self.emb_norm.forward(self.tok_embeddings.forward(input_ids.clone()));
         dump_tensor("emb_out", &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
@@ -458,46 +519,16 @@ impl Laya {
             }
             }
 
-            let mut mask = pad_add.clone();
-            let mut mask_bool = pad_bool.clone();
-            if !layer.is_global {
-                let mut m = vec![0.0f32; seq * seq];
-                let mut mb = vec![false; seq * seq];
-                for i in 0..seq {
-                    for j in 0..seq {
-                        if (i as isize - j as isize).unsigned_abs() > self.window_size / 2 {
-                            m[i * seq + j] = -1.0e9;
-                            mb[i * seq + j] = true;
-                        }
-                    }
-                }
-                mask = mask
-                    + Tensor::<1>::from_floats(m.as_slice(), &device)
-                        .reshape([1, 1, seq, seq]);
-                let pad_rows = attention_mask
-                    .clone()
-                    .to_data()
-                    .as_slice::<i32>()
-                    .unwrap()
-                    .to_vec();
-                let mut data = Vec::with_capacity(batch * seq * seq);
-                for b in 0..batch {
-                    for i in 0..seq {
-                        for j in 0..seq {
-                            data.push(mb[i * seq + j] || pad_rows[b * seq + j] == 0);
-                        }
-                    }
-                }
-                mask_bool = Tensor::<3, Bool>::from_data(
-                    burn::tensor::TensorData::new(data, [batch, seq, seq]),
-                    &device,
-                )
-                .reshape([batch, 1, seq, seq]);
-            }
             let amask = if use_manual {
+                let mut mask = pad_add.clone();
+                if !layer.is_global {
+                    if let Some(w) = &window_add {
+                        mask = mask + w.clone();
+                    }
+                }
                 AttnMask::Manual(mask)
             } else if !layer.is_global {
-                AttnMask::Bool(mask_bool)
+                AttnMask::Bool(window_bool.clone().unwrap())
             } else {
                 AttnMask::Bool(pad_bool.clone())
             };
