@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.95"
 
 [dependencies]
-burn = { path = "../burn/crates/burn", features = ["flex", "apple-amx", "metal", "autotune", "fusion"] }
+burn = { version = "0.22", features = ["flex", "apple-amx", "metal", "autotune", "fusion"] }
 safetensors = "0.8"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 serde_json = { version = "1", features = ["preserve_order"] }
