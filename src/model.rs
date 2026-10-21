@@ -305,6 +305,9 @@ impl Ropes {
 enum AttnMask {
     Manual(Tensor<4>),      // additive float mask (fallback comparison path)
     Bool(Tensor<4, Bool>),  // boolean mask for the fused module::attention kernel
+    // Pad-only bool mask plus a sliding-window size: the fused kernel applies
+    // the window itself (options.window); the bool mask keeps pad positions masked.
+    BoolWindow(Tensor<4, Bool>, usize),
     None,
 }
 
@@ -318,10 +321,11 @@ fn attention(
     let [batch, _h, seq, _d] = q.dims();
     let head_dim = q.dims()[3];
     if std::env::var("LAYA_ATTN").as_deref() != Ok("manual") {
-        let (m, bias) = match mask {
-            AttnMask::Bool(b) => (Some(b.clone()), None),
-            AttnMask::Manual(add) => (None, Some(add.clone())), // additive as bias: same softmax result
-            AttnMask::None => (None, None),
+        let (m, bias, window) = match mask {
+            AttnMask::Bool(b) => (Some(b.clone()), None, None),
+            AttnMask::BoolWindow(b, w) => (Some(b.clone()), None, Some(*w)),
+            AttnMask::Manual(add) => (None, Some(add.clone()), None), // additive as bias: same softmax result
+            AttnMask::None => (None, None, None),
         };
         let out = module::attention(
             q.clone(),
@@ -329,12 +333,16 @@ fn attention(
             v.clone(),
             m,
             bias,
-            burn::tensor::ops::AttentionModuleOptions::default(),
+            burn::tensor::ops::AttentionModuleOptions {
+                window,
+                ..Default::default()
+            },
         );
         return out.swap_dims(1, 2).reshape([batch, seq, n_heads * head_dim]);
     }
     let add = match mask {
         AttnMask::Manual(add) => add.clone(),
+        AttnMask::BoolWindow(_, _) => panic!("window kernel path on manual attention"),
         AttnMask::Bool(_) => panic!("bool mask on manual attention path"),
         AttnMask::None => {
             let z = Tensor::<1>::from_floats([0.0], &q.device());
@@ -461,6 +469,9 @@ impl Laya {
         };
 
         let use_manual = std::env::var("LAYA_ATTN").as_deref() == Ok("manual");
+        // LAYA_WINDOW_KERNEL: sliding layers let the fused kernel apply the window
+        // (options.window) and pass only the pad mask; the kernel combines both.
+        let window_kernel = !use_manual && std::env::var("LAYA_WINDOW_KERNEL").is_ok();
         let pad_bool = attention_mask.clone().equal_scalar(0).reshape([batch, 1, 1, seq]);
 
         // Masks are identical for every layer of one batch: build once, reuse
@@ -516,7 +527,11 @@ impl Laya {
                 }
                 AttnMask::Manual(mask)
             } else if !layer.is_global {
-                AttnMask::Bool(window_bool.clone())
+                if window_kernel {
+                    AttnMask::BoolWindow(pad_bool.clone(), self.window_size)
+                } else {
+                    AttnMask::Bool(window_bool.clone())
+                }
             } else {
                 AttnMask::Bool(pad_bool.clone())
             };
