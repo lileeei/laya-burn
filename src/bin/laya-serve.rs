@@ -232,7 +232,7 @@ async fn batch_flush_loop(
         .await
         .expect("batch join");
         for (req, res) in pending.into_iter().zip(results) {
-            let out = res.map(|(route, answers)| (route.name().to_string(), answers));
+            let out = res.map(|(route, answers)| (route.name().to_string(), answers)).map_err(|e| format!("{e:?}"));
             let _ = req.reply.send(out);
         }
     }

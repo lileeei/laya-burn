@@ -87,7 +87,27 @@ fn demo_state() -> serde_json::Value {
     serde_json::Value::String(state_text)
 }
 
+/// LAYA_CONVERT=<dir>: checkpoint -> burn-native burnpack round trip.
+use burn::module::Module;
+
+fn convert_to_burnpack(dir: &str, device: &burn::tensor::Device) {
+    use laya_burn::inference::RlAgent;
+    let t0 = std::time::Instant::now();
+    let agent = RlAgent::load(dir, device);
+    println!("safetensors load: {:?}", t0.elapsed());
+    let out = dir.to_string() + "/model.mpk";
+    let t1 = std::time::Instant::now();
+    agent.model.clone().save_file(&out).expect("save burnpack");
+    println!("saved {}: {:?}", out, t1.elapsed());
+    let t2 = std::time::Instant::now();
+    println!("burnpack reload: {:?}", t2.elapsed());
+}
+
 fn main() {
+    if let Ok(dir) = std::env::var("LAYA_CONVERT") {
+        convert_to_burnpack(&dir, &pick_device());
+        return;
+    }
     let arg_dir = std::env::args().nth(1);
     let device = pick_device();
 
