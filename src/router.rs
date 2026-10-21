@@ -398,8 +398,10 @@ pub struct Router {
     device: Device,
     english_dir: Option<String>,
     typed_dir: Option<String>,
+    multilingual_dir: Option<String>,
     english: RefCell<Option<RlAgent>>,
     typed: RefCell<Option<RlAgent>>,
+    multilingual: RefCell<Option<RlAgent>>,
     forced: Option<Route>,
 }
 
@@ -426,15 +428,19 @@ impl Router {
             typed_dir: std::path::Path::new("model/rl_agent_config.json")
                 .is_file()
                 .then(|| "model".to_string()),
+            multilingual_dir: std::path::Path::new("model-multilingual/rl_agent_config.json")
+                .is_file()
+                .then(|| "model-multilingual".to_string()),
             english: RefCell::new(None),
             typed: RefCell::new(None),
+            multilingual: RefCell::new(None),
             forced,
         }
     }
 
     /// Whether at least one loadable checkpoint directory was found.
     pub fn available(&self) -> bool {
-        self.english_dir.is_some() || self.typed_dir.is_some()
+        self.english_dir.is_some() || self.typed_dir.is_some() || self.multilingual_dir.is_some()
     }
 
     /// The route a state would take. Detection runs even when a route is
@@ -481,19 +487,20 @@ impl Router {
         let cell = match route {
             Route::English => &self.english,
             Route::TypedDecisions => &self.typed,
-            Route::Multilingual => {
-                return Err(RouterError::MultilingualUnimplemented(format!(
-                    "state routed to the multilingual checkpoint (script={}), which this crate does not implement: it uses the mmBERT-base encoder, a different architecture from the ModernBERT-large pipeline in src/model.rs. Use Latin-script input, or force a route with LAYA_MODEL=english|typed-decisions.",
-                    det.script
-                )))
-            }
+            Route::Multilingual => &self.multilingual,
         };
         if cell.borrow().is_none() {
             let dir = match route {
                 Route::English => self.english_dir.clone(),
-                _ => self.typed_dir.clone(),
+                Route::TypedDecisions => self.typed_dir.clone(),
+                Route::Multilingual => self.multilingual_dir.clone(),
             }
-            .ok_or_else(|| RouterError::Load(format!("{} checkpoint directory not found", route.name())))?;
+            .ok_or_else(|| {
+                RouterError::Load(format!(
+                    "state routed to the multilingual checkpoint (script={}) but model-multilingual/ was not found; download it per README, or force a route with LAYA_MODEL=english|typed-decisions.",
+                    det.script
+                ))
+            })?;
             eprintln!("laya: loading {} checkpoint from {dir} ...", route.name());
             *cell.borrow_mut() = Some(Self::load(&dir, &self.device));
         }

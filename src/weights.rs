@@ -94,6 +94,29 @@ impl Weights {
         t.cast(compute_dtype())
     }
 
+    /// Shape of a tensor without materializing it (header only).
+    pub fn raw_shape(&self, name: &str) -> (Vec<f32>, Vec<usize>) {
+        let st = SafeTensors::deserialize(&self.bytes).expect("deserialize safetensors");
+        let view = st
+            .tensor(name)
+            .unwrap_or_else(|_| panic!("tensor {name} missing from checkpoint"));
+        (Vec::new(), view.shape().to_vec())
+    }
+
+    /// Highest N in encoder.layers.N.* keys (layer count - 1).
+    pub fn max_layer_index(&self) -> usize {
+        let st = SafeTensors::deserialize(&self.bytes).expect("deserialize safetensors");
+        st.names()
+            .iter()
+            .filter_map(|n| {
+                let rest = n.strip_prefix("encoder.layers.")?;
+                let idx = rest.split('.').next()?;
+                idx.parse::<usize>().ok()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn has(&self, name: &str) -> bool {
         let st = SafeTensors::deserialize(&self.bytes).expect("deserialize safetensors");
         st.tensor(name).is_ok()

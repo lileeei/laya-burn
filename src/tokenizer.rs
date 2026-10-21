@@ -17,17 +17,32 @@ fn id_of(tok: &Tokenizer, token: &str) -> i64 {
 }
 
 impl LayaTokenizer {
+    /// Load tokenizer.json next to its tokenizer_config.json (same
+    /// directory). Special-token NAMES come from the config: the english
+    /// checkpoints use BERT-style [CLS]/[SEP], laya-multilingual uses
+    /// <bos>/<eos> (XLM-style) - the ids differ per checkpoint, the ROLES are
+    /// stable, so resolve by config name with the BERT name as fallback.
     pub fn load(path: &str) -> Self {
         let tok = Tokenizer::from_file(path).expect("load tokenizer.json");
+        let cfg_path = std::path::Path::new(path)
+            .parent()
+            .map(|d| d.join("tokenizer_config.json"))
+            .filter(|p| p.is_file());
+        let cfg: Option<serde_json::Value> = cfg_path
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok());
+        let name_of = |key: &str, fallback: &str| -> String {
+            cfg.as_ref()
+                .and_then(|c| c[key].as_str().map(str::to_string))
+                .unwrap_or_else(|| fallback.to_string())
+        };
         let t = Self {
-            cls_token_id: id_of(&tok, "[CLS]"),
-            sep_token_id: id_of(&tok, "[SEP]"),
-            mask_token_id: id_of(&tok, "[MASK]"),
-            pad_token_id: id_of(&tok, "[PAD]"),
+            cls_token_id: id_of(&tok, &name_of("cls_token", "[CLS]")),
+            sep_token_id: id_of(&tok, &name_of("sep_token", "[SEP]")),
+            mask_token_id: id_of(&tok, &name_of("mask_token", "[MASK]")),
+            pad_token_id: id_of(&tok, &name_of("pad_token", "[PAD]")),
             tok,
-        }
-        // Sanity: ModernBERT ids from the encoder config.
-        ;
+        };
         t
     }
 

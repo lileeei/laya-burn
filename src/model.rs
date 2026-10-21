@@ -68,6 +68,23 @@ impl EncoderConfig {
             epsilon: 1e-5,
         }
     }
+
+    /// mmBERT-base (laya-multilingual): ModernBERT-base geometry, vocab 256k,
+    /// both rope thetas 160000 per its encoder config.
+    pub fn multilingual() -> Self {
+        Self {
+            hidden_size: 768,
+            num_layers: 22,
+            num_heads: 12,
+            intermediate_size: 1152,
+            window_size: 128,
+            global_every: 3,
+            max_sequence_length: 1088,
+            rope_theta_full: 160_000.0,
+            rope_theta_sliding: 160_000.0,
+            epsilon: 1e-5,
+        }
+    }
 }
 
 fn param<T: ParameterValue>(t: T) -> Param<T> {

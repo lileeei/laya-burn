@@ -112,7 +112,42 @@ impl RlAgent {
             eprintln!("clamped temperatures: {clamped_temperatures:?}");
         }
 
-        let ecfg = EncoderConfig::laya();
+        // Architecture auto-detection from the checkpoint tensor shapes:
+        // tok_embeddings [vocab, hidden] gives hidden (and thus heads = hidden/64);
+        // the highest encoder.layers.N index gives the layer count. Geometry
+        // that is not encoded in shapes (window, thetas, epsilon) matches every
+        // shipped checkpoint so far (128 / 160k / 1e-5); mmBERT uses 160k for
+        // BOTH thetas where large uses 10k sliding - disambiguate via the
+        // encoder/config.json next to the checkpoint when present.
+        let (vocab, hidden) = {
+            let (data, shape) = w.raw_shape("encoder.embeddings.tok_embeddings.weight");
+            let _ = data;
+            (shape[0], shape[1])
+        };
+        let num_layers = w.max_layer_index() + 1;
+        // NB: HF's ModernBertAttention reads the legacy top-level
+        // local_rope_theta (default 10000), NOT the rope_parameters dict some
+        // encoder configs ship - laya-multilingual's config says 160000 there
+        // but the weights were trained with 10000 (verified by parity).
+        let sliding_theta = 10_000.0f32;
+        // Optional override for rope experiments (LAYA_THETA_SLIDE=...).
+        let sliding_theta = std::env::var("LAYA_THETA_SLIDE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(sliding_theta);
+        let ecfg = EncoderConfig {
+            hidden_size: hidden,
+            num_layers,
+            num_heads: hidden / 64,
+            intermediate_size: if hidden == 1024 { 2624 } else { 1152 },
+            window_size: 128,
+            global_every: 3,
+            max_sequence_length: 1088,
+            rope_theta_full: 160_000.0,
+            rope_theta_sliding: sliding_theta,
+            epsilon: 1e-5,
+        };
+        let _ = vocab;
         // head_layers comes from the checkpoint config (both ModernBERT-large
         // checkpoints ship 2; kept configurable for future same-architecture
         // variants).

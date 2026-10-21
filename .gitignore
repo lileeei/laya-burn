@@ -3,3 +3,4 @@
 /model-english
 .DS_Store
 wasm/target
+/model-multilingual

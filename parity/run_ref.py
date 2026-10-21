@@ -10,6 +10,7 @@ OUT = os.environ.get("LAYA_DUMP_DIR", "parity/ref_out")
 os.makedirs(OUT, exist_ok=True)
 
 sys.path.insert(0, MODEL_DIR)
+sys.path.insert(0, "model")  # rl_common.py lives with the english checkout
 from rl_common import QTYPES, build_model, build_sequence, collate_items, render_options  # noqa: E402
 from safetensors.torch import load_file  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
@@ -27,12 +28,12 @@ def main():
     with open(f"{MODEL_DIR}/rl_agent_config.json") as fh:
         cfg = json.load(fh)
     tok = AutoTokenizer.from_pretrained(f"{MODEL_DIR}/tokenizer")
-    model = build_model(cfg, encoder_dir=f"{MODEL_DIR}/typed-decisions/encoder")
+    model = build_model(cfg, encoder_dir=os.environ.get("LAYA_REF_ENCODER", f"{MODEL_DIR}/typed-decisions/encoder"))
     model.load_state_dict(load_file(f"{MODEL_DIR}/model.safetensors"), strict=True)
     model.eval()
 
     # same questions as src/main.rs, same order
-    state = "The user is deciding whether to run a 421M non-autoregressive decision model in Rust. Facts: Burn is a Rust tensor framework; a checkpoint is available."
+    state = os.environ.get("LAYA_REF_STATE", "The user is deciding whether to run a 421M non-autoregressive decision model in Rust. Facts: Burn is a Rust tensor framework; a checkpoint is available.")
     qs = [
         ("choice", "Which option is the largest number?", [str(n) for n in range(1, 13)]),
         ("noul", "The word 'apple' contains the letter 'a'.", None),
