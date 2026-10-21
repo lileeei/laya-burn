@@ -4,3 +4,7 @@
 .DS_Store
 wasm/target
 /model-multilingual
+parity/rust_out/
+parity/rust_ml/
+parity/rust_flex/
+parity/ref_out/
