@@ -91,7 +91,7 @@ fn demo_state() -> serde_json::Value {
 use burn::module::Module;
 
 fn convert_to_burnpack(dir: &str, device: &burn::tensor::Device) {
-    use laya_burn::inference::RlAgent;
+    use laya_burn::inference::{QuestionInput, RlAgent};
     let t0 = std::time::Instant::now();
     let agent = RlAgent::load(dir, device);
     println!("safetensors load: {:?}", t0.elapsed());
@@ -99,8 +99,31 @@ fn convert_to_burnpack(dir: &str, device: &burn::tensor::Device) {
     let t1 = std::time::Instant::now();
     agent.model.clone().save_file(&out).expect("save burnpack");
     println!("saved {}: {:?}", out, t1.elapsed());
+
+    // Reload via the EAGER record path: ModuleRecord::load materializes every
+    // tensor on read. (Module::load_file returned a lazy wrapper whose first
+    // forward never completed - 41 ns return, then hang.)
     let t2 = std::time::Instant::now();
+    let record = burn::store::ModuleRecord::load(&out).expect("read burnpack");
+    let mut agent2 = RlAgent::load(dir, device);
+    agent2.model = agent2.model.load_record(record);
     println!("burnpack reload: {:?}", t2.elapsed());
+
+    // Round-trip proof: the same question through both agents must agree.
+    let question = QuestionInput {
+        qtype: 0,
+        instructions: "Which runtime should host the model for CPU inference in Rust?".to_string(),
+        options: vec!["burn".into(), "candle".into(), "onnxruntime".into(), "libtorch".into()],
+    };
+    let state = serde_json::Value::String(
+        "The user is deciding whether to run a 421M non-autoregressive decision model in Rust.".to_string(),
+    );
+    let a1 = agent.system_one(device, &state, &[question.clone()], None);
+    let a2 = agent2.system_one(device, &state, &[question], None);
+    println!("round-trip original:  {a1:?}");
+    println!("round-trip burnpack:  {a2:?}");
+    let same = format!("{a1:?}") == format!("{a2:?}");
+    println!("ROUND-TRIP: {}", if same { "PASS" } else { "FAIL" });
 }
 
 fn main() {
