@@ -666,7 +666,9 @@ impl Laya {
             };
             let attn_mode = std::env::var("LAYA_ATTN").unwrap_or_default();
             let use_blocks = attn_mode == "blocks" && !layer.is_global;
-            let use_kernel = attn_mode == "kernel" && !layer.is_global;
+            let use_kernel = attn_mode == "kernel"
+                && !layer.is_global
+                && crate::weights::compute_dtype() == burn::tensor::FloatDType::F32;
             let attn_res = if use_kernel {
                 let pad_f = attention_mask.clone().float().reshape([batch, seq]);
                 crate::window_kernel::windowed_attention(q, k, v, pad_f).swap_dims(1, 2).reshape([batch, seq, d])

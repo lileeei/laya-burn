@@ -231,3 +231,18 @@ impl PythonJson {
         }
     }
 }
+
+#[cfg(test)]
+mod pyjson_tests {
+    use super::PythonJson;
+    use serde_json::json;
+
+    #[test]
+    fn state_matches_expected_python_dumps() {
+        let v = json!({"b": 1, "a": [2.5, null, "x"]});
+        // json.dumps(..., ensure_ascii=False, separators=(", ", ": ")) with insertion order
+        assert_eq!(PythonJson::state(&v), "{\"b\": 1, \"a\": [2.5, null, \"x\"]}");
+        assert_eq!(PythonJson::state(&json!("plain")), "plain");
+    }
+}
+

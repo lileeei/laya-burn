@@ -146,6 +146,10 @@ impl WindowAttentionBackend for burn_cubecl::CubeBackend {
 
         let [batch, heads, seq, dim] = q.meta.shape().dims::<4>();
         assert_eq!(dim, HEAD_DIM, "kernel is specialized for 64-wide heads");
+        assert_eq!(
+            dtype, burn::backend::DType::F32,
+            "the kernel path requires F32 compute (LAYA_DTYPE unset)"
+        );
 
         let shape_out = q.meta.shape().clone();
         let buffer = q.client.empty(shape_out.num_elements() * dtype.size());

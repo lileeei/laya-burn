@@ -1,16 +1,10 @@
 //! Demo: run the real Laya checkpoint on typed questions.
 
-mod calibration;
-mod inference;
-mod model;
-mod sequence;
-mod python_json;
-mod tokenizer;
-mod weights;
-mod window_kernel;
+use laya_burn::{model, window_kernel};
+use laya_burn::inference::{QuestionInput, RlAgent};
 
 use burn::tensor::Device;
-use inference::{QuestionInput, RlAgent};
+
 
 fn pick_device() -> Device {
     match std::env::var("LAYA_DEVICE").as_deref() {
@@ -20,63 +14,8 @@ fn pick_device() -> Device {
     }
 }
 
-fn wa_test() {
-    use burn::tensor::{Device, Tensor, activation};
-    let device = Device::metal(burn::tensor::DeviceKind::DefaultDevice);
-    let (b, h, s, d) = (2usize, 3usize, 200usize, 64usize);
-    let q = Tensor::<4>::random([b, h, s, d], burn::tensor::Distribution::Default, &device);
-    let k = Tensor::<4>::random([b, h, s, d], burn::tensor::Distribution::Default, &device);
-    let v = Tensor::<4>::random([b, h, s, d], burn::tensor::Distribution::Default, &device);
-    // Half of each batch row is padding (like real batches with varied lengths).
-    let mut pm = vec![1.0f32; b * s];
-    for bb in 0..b {
-        for j in (s / 2)..s {
-            pm[bb * s + j] = 0.0;
-        }
-    }
-    let pad = Tensor::<1>::from_floats(pm.as_slice(), &device).reshape([b, s]);
-    let _ = &pad;
-
-    let custom = window_kernel::windowed_attention(q.clone(), k.clone(), v.clone(), pad);
-
-    let scores = q.matmul(k.transpose()) * (1.0f32 / 8.0);
-    // Reference must apply the same window mask the kernel implements.
-    let mut m = vec![-1.0e9f32; b * s * s];
-    for bb in 0..b {
-        for i in 0..s {
-            for j in 0..s {
-                if (i as isize - j as isize).unsigned_abs() <= 64 && pm[bb * s + j] == 1.0 {
-                    m[(bb * s + i) * s + j] = 0.0;
-                }
-            }
-        }
-    }
-    let win = burn::tensor::Tensor::<1>::from_floats(m.as_slice(), &device)
-        .reshape([b, 1, s, s]);
-    let scores = scores + win;
-    let probs = activation::softmax(scores, 3);
-    let reference = probs.matmul(v);
-
-    // Compare only non-pad query rows: fully-masked rows are 0/0 in any
-    // implementation and carry no signal downstream.
-    let valid = {
-        let mut vi = vec![1.0f32; b * s];
-        for bb in 0..b {
-            for j in (s / 2)..s {
-                vi[bb * s + j] = 0.0;
-            }
-        }
-        Tensor::<1>::from_floats(vi.as_slice(), &device).reshape([b, 1, s, 1])
-    };
-    let diff: f32 = ((custom - reference).abs() * valid).max().into_scalar::<f32>().into();
-    println!("wa_test: max |custom - reference| over valid rows = {diff}");
-}
 
 fn main() {
-    if std::env::var("LAYA_WA_TEST").is_ok() {
-        wa_test();
-        return;
-    }
     let model_dir = std::env::args().nth(1).unwrap_or_else(|| "model".to_string());
     println!("loading laya from {model_dir} ...");
     let t0 = std::time::Instant::now();
@@ -166,16 +105,3 @@ fn main() {
     }
 }
 
-#[cfg(test)]
-mod pyjson_tests {
-    use crate::python_json::PythonJson;
-    use serde_json::json;
-
-    #[test]
-    fn state_matches_expected_python_dumps() {
-        let v = json!({"b": 1, "a": [2.5, null, "x"]});
-        // json.dumps(..., ensure_ascii=False, separators=(", ", ": ")) with insertion order
-        assert_eq!(PythonJson::state(&v), "{\"b\": 1, \"a\": [2.5, null, \"x\"]}");
-        assert_eq!(PythonJson::state(&json!("plain")), "plain");
-    }
-}
