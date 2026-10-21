@@ -1,3 +1,5 @@
 /target
 /model
+/model-english
 .DS_Store
+wasm/target

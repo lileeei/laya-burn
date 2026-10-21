@@ -11,8 +11,15 @@ burn = { version = "0.22", features = ["flex", "apple-amx", "metal", "autotune",
 burn-cubecl = "0.22"
 cubecl = { version = "0.11", features = ["wgpu"] }
 safetensors = "0.8"
-tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.23", default-features = false }
 serde_json = { version = "1", features = ["preserve_order"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+tokenizers = { version = "0.23", default-features = false, features = ["unstable_wasm"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,48 @@
+# Spike crate: prove (or disprove) that the laya-burn stack can build for wasm32 + WebGPU.
+#
+# Layout:
+#   - default build (no features): Milestone A. Direct burn 0.22 dependency with
+#     default-features = false, features = ["std", "webgpu"]. This mirrors what
+#     burn's own examples/mnist-inference-web uses for wasm. Gate:
+#     cargo build --target wasm32-unknown-unknown -p laya-web
+#   - feature "tokenizer": Milestone B. Adds tokenizers 0.23 built for wasm
+#     (default-features = false, features = ["unstable_wasm"], i.e. fancy-regex
+#     instead of onig + getrandom/wasm_js).
+#   - feature "laya": the real question. Adds the parent laya-burn by path.
+#     Cargo features are additive, so laya-burn's hard-coded
+#     burn features ["flex","apple-amx","metal","autotune","fusion"] and
+#     tokenizers features ["onig"] cannot be disabled from here. See REPORT.md
+#     for the observed outcome.
+[package]
+name = "laya-web"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+burn = { version = "0.22", default-features = false, features = ["std", "webgpu"] }
+wasm-bindgen = "0.2"
+# Additive feature fix: burn's chain pulls rand -> getrandom, which does not
+# compile for wasm32-unknown-unknown unless its wasm_js backend is enabled.
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+# Milestone B (stretch): tokenizers on wasm. "unstable_wasm" switches the regex
+# backend to fancy-regex (pure Rust) and enables getrandom/wasm_js.
+tokenizers = { version = "0.23", default-features = false, features = ["unstable_wasm"], optional = true }
+
+# Full stack: the parent crate. Optional so the proven core (Milestone A) keeps
+# building even while the parent's feature set is under investigation.
+laya-burn = { path = "../", optional = true }
+
+[features]
+default = []
+tokenizer = ["dep:tokenizers"]
+laya = ["dep:laya-burn"]
+full = ["laya", "tokenizer"]
+# Reproduces exactly what feature unification does to the burn crate when the
+# parent laya-burn is linked (its burn dep hard-codes these features), without
+# pulling in the parent's tokenizers/onig. Used to isolate which side blocks.
+parent-burn-features = ["burn/flex", "burn/apple-amx", "burn/metal", "burn/autotune", "burn/fusion"]

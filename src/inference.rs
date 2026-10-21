@@ -113,7 +113,11 @@ impl RlAgent {
         }
 
         let ecfg = EncoderConfig::laya();
-        let model = Laya::load(&w, &ecfg, 2, device);
+        // head_layers comes from the checkpoint config (both ModernBERT-large
+        // checkpoints ship 2; kept configurable for future same-architecture
+        // variants).
+        let head_layers = cfg["head_layers"].as_u64().unwrap_or(2) as usize;
+        let model = Laya::load(&w, &ecfg, head_layers, device);
         let ropes = Ropes::new(&ecfg, device);
         let tok = LayaTokenizer::load(&format!("{model_dir}/tokenizer/tokenizer.json"));
         Self { model, ropes, tok, max_len, head_max_len, temperature, temperature_by_options, clamped_temperatures }

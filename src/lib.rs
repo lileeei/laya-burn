@@ -5,6 +5,7 @@ pub mod calibration;
 pub mod inference;
 pub mod model;
 pub mod python_json;
+pub mod router;
 pub mod sequence;
 pub mod tokenizer;
 pub mod weights;
