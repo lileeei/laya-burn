@@ -3920,6 +3920,8 @@ name = "laya-burn"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "burn-cubecl",
+ "cubecl",
  "safetensors 0.8.0",
  "serde_json",
  "tokenizers",
