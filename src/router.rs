@@ -56,6 +56,7 @@ impl Route {
 
 /// What went wrong on a routed prediction.
 #[derive(Debug)]
+#[derive(Clone)]
 pub enum RouterError {
     /// The request needs the mmBERT-base multilingual checkpoint, which this
     /// crate does not implement (only the ModernBERT-large pipeline in
@@ -507,6 +508,88 @@ impl Router {
         let guard = cell.borrow();
         let agent = guard.as_ref().unwrap();
         Ok((route, agent.system_one(&self.device, state, questions, None)))
+    }
+
+    /// Batched predict for the server: items each carry their own state and
+    /// questions; routing happens per item (cheap CPU detection), items are
+    /// grouped by route, and each group runs as ONE batched forward. Returns
+    /// per-item (route, answers) in input order.
+    pub fn predict_many(
+        &self,
+        items: &[(Value, Vec<QuestionInput>)],
+    ) -> Vec<Result<(Route, Vec<Answer>), RouterError>> {
+        use std::cell::RefCell;
+
+        // Group item indices by detected route (forced route overrides).
+        let mut groups: Vec<(Route, Vec<usize>)> = Vec::new();
+        let mut routed: Vec<Result<Route, RouterError>> = Vec::with_capacity(items.len());
+        for (i, (state, _)) in items.iter().enumerate() {
+            // self.route returns (Route, Detection), not a Result.
+            let (detected, _det) = self.route(state);
+            let route = self.forced.unwrap_or(detected);
+            routed.push(Ok(route));
+            match groups.iter_mut().find(|(g, _)| *g == route) {
+                Some((_, v)) => v.push(i),
+                None => groups.push((route, vec![i])),
+            }
+        }
+
+        // One batched forward per route group.
+        let mut results: Vec<Option<Vec<Answer>>> = vec![None; items.len()];
+        for (route, idxs) in &groups {
+            let group: Vec<(Value, Vec<QuestionInput>)> = idxs
+                .iter()
+                .map(|i| items[*i].clone())
+                .collect();
+            let outcome = (|| -> Result<Vec<Vec<Answer>>, RouterError> {
+                let cell = match route {
+                    Route::English => &self.english,
+                    Route::TypedDecisions => &self.typed,
+                    Route::Multilingual => &self.multilingual,
+                };
+                if cell.borrow().is_none() {
+                    let dir = match route {
+                        Route::English => self.english_dir.clone(),
+                        Route::TypedDecisions => self.typed_dir.clone(),
+                        Route::Multilingual => self.multilingual_dir.clone(),
+                    }
+                    .ok_or_else(|| {
+                        RouterError::Load(format!(
+                            "state routed to {} but its checkpoint directory was not found",
+                            route.name()
+                        ))
+                    })?;
+                    eprintln!("laya: loading {} checkpoint from {dir} ...", route.name());
+                    let loaded = Self::load(&dir, &self.device);
+                    let _ = RefCell::new(()); // keep RefCell import used on all cfgs
+                    *cell.borrow_mut() = Some(loaded);
+                }
+                let guard = cell.borrow();
+                let agent = guard.as_ref().unwrap();
+                Ok(agent.system_one_many(&self.device, &group, None))
+            })();
+            match outcome {
+                Ok(per_item) => {
+                    for (j, i) in idxs.iter().enumerate() {
+                        results[*i] = Some(per_item[j].clone());
+                    }
+                }
+                Err(e) => {
+                    for i in idxs {
+                        routed[*i] = Err(e.clone());
+                    }
+                }
+            }
+        }
+
+        routed.into_iter()
+            .enumerate()
+            .map(|(i, r)| match (r, results[i].take()) {
+                (Ok(route), Some(ans)) => Ok((route, ans)),
+                (Ok(_), None) => Err(RouterError::Load("internal: missing batched result".into())),
+                (Err(e), _) => Err(e),
+            })
+            .collect()
     }
 }
 

@@ -12,8 +12,16 @@ use laya_burn::inference::QuestionInput;
 use laya_burn::router::{Route, Router};
 use serde_json::{Value, json};
 
+pub struct BatchRequest {
+    pub state: Value,
+    pub questions: Vec<QuestionInput>,
+    pub reply: tokio::sync::oneshot::Sender<Result<(String, Vec<laya_burn::inference::Answer>), String>>,
+}
+
 struct AppState {
     router: Mutex<Router>,
+    /// Some(..) when LAYA_BATCH_MS is set: requests go through the micro-batcher.
+    batch_tx: Option<tokio::sync::mpsc::UnboundedSender<BatchRequest>>,
 }
 
 #[tokio::main]
@@ -32,9 +40,18 @@ async fn main() {
     let forced = std::env::var("LAYA_MODEL").unwrap_or_else(|_| "auto".into());
     eprintln!("laya-serve: listening on 0.0.0.0:{port} (LAYA_MODEL={forced})");
 
+    let (batch_tx, batch_rx) = tokio::sync::mpsc::unbounded_channel::<BatchRequest>();
+    let batch_ms: u64 = std::env::var("LAYA_BATCH_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let batch_max: usize = std::env::var("LAYA_BATCH_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(32);
     let state = std::sync::Arc::new(AppState {
         router: Mutex::new(router),
+        batch_tx: if batch_ms > 0 { Some(batch_tx.clone()) } else { None },
     });
+    if batch_ms > 0 {
+        eprintln!("laya-serve: micro-batching on (window {batch_ms}ms, max {batch_max})");
+        let st = state.clone();
+        tokio::spawn(batch_flush_loop(st, batch_rx, batch_ms, batch_max));
+    }
 
     let app = AxumRouter::new()
         .route("/health", get(health))
@@ -178,6 +195,48 @@ async fn decide(
     }
 }
 
+/// Collect requests for up to window_ms (or until max queued) and run them
+/// as one router.predict_many call per flush.
+async fn batch_flush_loop(
+    st: std::sync::Arc<AppState>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<BatchRequest>,
+    window_ms: u64,
+    max: usize,
+) {
+    loop {
+        let first = match rx.recv().await {
+            Some(r) => r,
+            None => break,
+        };
+        let mut pending = vec![first];
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(window_ms);
+        while pending.len() < max {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(r)) => pending.push(r),
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        let items: Vec<(Value, Vec<QuestionInput>)> = pending
+            .iter()
+            .map(|r| (r.state.clone(), r.questions.clone()))
+            .collect();
+        let st2 = st.clone();
+        let results = tokio::task::spawn_blocking(move || {
+            let r = st2.router.lock().unwrap();
+            r.predict_many(&items)
+        })
+        .await
+        .expect("batch join");
+        for (req, res) in pending.into_iter().zip(results) {
+            let out = res.map(|(route, answers)| (route.name().to_string(), answers));
+            let _ = req.reply.send(out);
+        }
+    }
+}
 fn answer_json(q: &QuestionInput, a: &laya_burn::inference::Answer) -> Value {
     use laya_burn::inference::Answer;
     match a {

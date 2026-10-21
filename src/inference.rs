@@ -31,7 +31,7 @@ pub struct QuestionInput {
     pub options: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Answer {
     Choice {
         index: usize,
@@ -258,6 +258,126 @@ impl RlAgent {
             let _ = act;
             answers.push(answer);
         }
+        answers
+    }
+
+
+    /// Batched variant for the server: each item carries its OWN state and
+    /// questions; all rows are collated into ONE forward pass. Returns one
+    /// Vec<Answer> per input item, in order.
+    pub fn system_one_many(
+        &self,
+        device: &Device,
+        items: &[(Value, Vec<QuestionInput>)],
+        replay: Option<&mut ReplayEngine<'_>>,
+    ) -> Vec<Vec<Answer>> {
+        let rows: Vec<(String, &QuestionInput)> = items
+            .iter()
+            .flat_map(|(state, qs)| {
+                let s = PythonJson::state(state);
+                qs.iter().map(move |q| (s.clone(), q)).collect::<Vec<_>>()
+            })
+            .collect();
+        let flat = self.run_rows(device, &rows, replay);
+        let mut out = Vec::with_capacity(items.len());
+        let mut at = 0;
+        for (_, qs) in items {
+            let n = qs.len();
+            out.push(flat[at..at + n].to_vec());
+            at += n;
+        }
+        out
+    }
+
+    /// Row-level core shared by system_one / system_one_many.
+    fn run_rows(
+        &self,
+        device: &Device,
+        rows: &[(String, &QuestionInput)],
+        replay: Option<&mut ReplayEngine<'_>>,
+    ) -> Vec<Answer> {
+        let mut seqs = Vec::new();
+        for (state_str, q) in rows {
+            let (ids, markers) = build_sequence(
+                &self.tok,
+                state_str,
+                &Question { qtype: q.qtype, instructions: q.instructions.clone(), options: q.options.clone() },
+                self.max_len,
+                self.head_max_len,
+            );
+            seqs.push((ids, markers, q.qtype as i64));
+        }
+        let batch_len: usize = seqs.iter().map(|(ids, _, _)| ids.len()).max().unwrap();
+        let n_markers: usize = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
+        let b = collate(&seqs, self.tok.pad_token_id, batch_len, n_markers);
+        let Batch { input_ids: b_input_ids, attention_mask: b_attention_mask, marker_pos: b_marker_pos, marker_mask: b_marker_mask, qtype: b_qtype } = b;
+
+        if let Ok(dir) = std::env::var("LAYA_DUMP_DIR") {
+            let _ = std::fs::create_dir_all(&dir);
+            let rows: Vec<String> = b_input_ids
+                .iter()
+                .map(|r| r.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
+                .collect();
+            let _ = std::fs::write(format!("{dir}/all_rows.txt"), rows.join("
+"));
+        }
+        // LAYA_REPLAY=1 routes the forward through the per-shape graph
+        // cache; when unset (replay == None) the direct path below runs
+        // exactly as before.
+        let key: ShapeKey = (seqs.len(), batch_len, n_markers);
+        let (logits, act_logits) = match replay {
+            None => self.model.forward(
+                t2i(b_input_ids, batch_len, device),
+                t2i(b_attention_mask, batch_len, device),
+                t2i(b_marker_pos, n_markers, device),
+                t2i(b_marker_mask, n_markers, device),
+                t1i(b_qtype, device),
+                &self.ropes,
+            ),
+            Some(engine) => engine.run(key, || StableInputs {
+                input_ids: t2i(b_input_ids, batch_len, device),
+                attention_mask: t2i(b_attention_mask, batch_len, device),
+                marker_pos: t2i(b_marker_pos, n_markers, device),
+                marker_mask: t2i(b_marker_mask, n_markers, device),
+                qtype: t1i(b_qtype, device),
+            }),
+        };
+
+        let logits = logits.to_data().as_slice::<f32>().unwrap().to_vec();
+        let act_row = act_logits.to_data().as_slice::<f32>().unwrap().to_vec();
+        let act = Calibration::softmax(&act_row[..2]);
+
+        let mut answers = Vec::new();
+        for (r, (_, q)) in rows.iter().enumerate() {
+            let k = seqs[r].1.len();
+            let bucket = Calibration::temp_bucket(q.qtype, k);
+            let temp = self
+                .temperature_by_options
+                .iter()
+                .find(|(key, _)| *key == bucket)
+                .map(|&(_, t)| t)
+                .unwrap_or(self.temperature[q.qtype]);
+            let z: Vec<f32> = (0..k).map(|c| logits[r * n_markers + c]).collect();
+            let p = Calibration::probabilities(&z, k, temp);
+            let answer = match q.qtype {
+                0 => Answer::Choice {
+                    index: Calibration::arg_max(&p),
+                    probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
+                    confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
+                },
+                1 => Answer::Score {
+                    score: Calibration::round4(Calibration::expected_score(&p)) as f32,
+                    probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
+                    confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
+                },
+                _ => Answer::Noul {
+                    prob: Calibration::round4(p[1]) as f32,
+                },
+            };
+            let _ = act;
+            answers.push(answer);
+        }
+
         answers
     }
 }
