@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 import json
+import os
 import statistics
 
-ours = json.load(open('/tmp/sweep51_ours.json'))
+ours = json.load(open(os.environ.get('LAYA_SWEEP_OURS', '/tmp/sweep51_ours.json')))
 ref = json.load(open('/tmp/laya-official/research/results/cpu_51_language_sweep.json'))
 ref_pl = ref['part_a']['by_model']['english']['per_language']
 

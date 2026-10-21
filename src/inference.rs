@@ -77,10 +77,20 @@ impl RlAgent {
         let head_max_len = cfg["head_max_len"].as_u64().unwrap() as usize;
         // Clamp every fitted temperature to [0.5, 5.0] (official SDK behavior, issue #42):
         // a sub-0.5 temperature would sharpen logits and overstate confidence.
+        // LAYA_UNCLAMPED=1 keeps the RAW fitted temperatures - what the
+        // official harness uses to reproduce its committed sweep numbers
+        // (--unclamped), as opposed to the clamped readout the SDK applies.
+        let maybe_clamp = |raw: f64| {
+            if std::env::var("LAYA_UNCLAMPED").as_deref() == Ok("1") {
+                raw
+            } else {
+                Calibration::clamp_temperature(raw)
+            }
+        };
         let temperature = [
-            Calibration::clamp_temperature(cfg["temperature"][0].as_f64().unwrap_or(1.0)),
-            Calibration::clamp_temperature(cfg["temperature"][1].as_f64().unwrap_or(1.0)),
-            Calibration::clamp_temperature(cfg["temperature"][2].as_f64().unwrap_or(1.0)),
+            maybe_clamp(cfg["temperature"][0].as_f64().unwrap_or(1.0)),
+            maybe_clamp(cfg["temperature"][1].as_f64().unwrap_or(1.0)),
+            maybe_clamp(cfg["temperature"][2].as_f64().unwrap_or(1.0)),
         ];
         let temperature_by_options: Vec<(String, f64)> = cfg["temperature_by_options"]
             .as_object()
@@ -88,7 +98,7 @@ impl RlAgent {
                 m.iter()
                     .map(|(k, v)| {
                         let raw = v.as_f64().unwrap_or(1.0);
-                        (k.clone(), Calibration::clamp_temperature(raw))
+                        (k.clone(), maybe_clamp(raw))
                     })
                     .collect()
             })
@@ -197,17 +207,27 @@ impl RlAgent {
         .unwrap();
         let max_len = cfg["max_len"].as_u64().unwrap() as usize;
         let head_max_len = cfg["head_max_len"].as_u64().unwrap() as usize;
+        // LAYA_UNCLAMPED=1 keeps the RAW fitted temperatures - what the
+        // official harness uses to reproduce its committed sweep numbers
+        // (--unclamped), as opposed to the clamped readout the SDK applies.
+        let maybe_clamp = |raw: f64| {
+            if std::env::var("LAYA_UNCLAMPED").as_deref() == Ok("1") {
+                raw
+            } else {
+                Calibration::clamp_temperature(raw)
+            }
+        };
         let temperature = [
-            Calibration::clamp_temperature(cfg["temperature"][0].as_f64().unwrap_or(1.0)),
-            Calibration::clamp_temperature(cfg["temperature"][1].as_f64().unwrap_or(1.0)),
-            Calibration::clamp_temperature(cfg["temperature"][2].as_f64().unwrap_or(1.0)),
+            maybe_clamp(cfg["temperature"][0].as_f64().unwrap_or(1.0)),
+            maybe_clamp(cfg["temperature"][1].as_f64().unwrap_or(1.0)),
+            maybe_clamp(cfg["temperature"][2].as_f64().unwrap_or(1.0)),
         ];
         let temperature_by_options: Vec<(String, f64)> = cfg["temperature_by_options"]
             .as_object()
             .map(|m| {
                 m.iter()
                     .map(|(k, v)| {
-                        (k.clone(), Calibration::clamp_temperature(v.as_f64().unwrap_or(1.0)))
+                        (k.clone(), maybe_clamp(v.as_f64().unwrap_or(1.0)))
                     })
                     .collect()
             })
