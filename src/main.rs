@@ -98,16 +98,28 @@ fn convert_to_burnpack(dir: &str, device: &burn::tensor::Device) {
     let out = dir.to_string() + "/model.mpk";
     let t1 = std::time::Instant::now();
     agent.model.clone().save_file(&out).expect("save burnpack");
-    println!("saved {}: {:?}", out, t1.elapsed());
+    // Sidecar: the geometry needed to rebuild the module tree from zeros.
+    let spec = laya_burn::skeleton::SkeletonSpec {
+        vocab: 50_368, // per-checkpoint vocab; see README on auto-detection
+        hidden: 1024,
+        layers: 28,
+        intermediate: 2624,
+        head_layers: 2,
+        sliding_theta: 10_000.0,
+    };
+    std::fs::write(
+        dir.to_string() + "/model.mpk.json",
+        serde_json::to_string_pretty(&spec).unwrap(),
+    )
+    .expect("write sidecar");
+    println!("saved {} + sidecar: {:?}", out, t1.elapsed());
 
-    // Reload via the EAGER record path: ModuleRecord::load materializes every
-    // tensor on read. (Module::load_file returned a lazy wrapper whose first
-    // forward never completed - 41 ns return, then hang.)
+    // Reload with NO safetensors access: skeleton from the sidecar, weights
+    // from the burnpack (eager record path - Module::load_file's lazy wrapper
+    // hangs the first forward).
     let t2 = std::time::Instant::now();
-    let record = burn::store::ModuleRecord::load(&out).expect("read burnpack");
-    let mut agent2 = RlAgent::load(dir, device);
-    agent2.model = agent2.model.load_record(record);
-    println!("burnpack reload: {:?}", t2.elapsed());
+    let agent2 = RlAgent::load_burnpack(dir, device);
+    println!("burnpack-only reload: {:?}", t2.elapsed());
 
     // Round-trip proof: the same question through both agents must agree.
     let question = QuestionInput {

@@ -93,24 +93,23 @@ fn param<T: ParameterValue>(t: T) -> Param<T> {
 
 /// Linear from checkpoint tensors. Checkpoint stores PyTorch [out, in];
 /// Burn Linear expects [in, out].
-fn linear_from(w: &Weights, wt: Tensor<2>, bias: Option<Tensor<1>>) -> Linear {
-    let _ = w;
+fn linear_from(wt: Tensor<2>, bias: Option<Tensor<1>>) -> Linear {
     Linear {
         weight: param(wt.transpose()),
         bias: bias.map(param),
     }
 }
 
-fn linear(w: &Weights, prefix: &str, device: &Device) -> Linear {
+fn linear<W: crate::weights::WeightSource>(w: &W, prefix: &str, device: &Device) -> Linear {
     let wt = w.t2(&format!("{prefix}.weight"), device);
     let b = w
         .has(&format!("{prefix}.bias"))
         .then(|| w.t1(&format!("{prefix}.bias"), device));
-    linear_from(w, wt, b)
+    linear_from(wt, b)
 }
 
 /// LayerNorm without bias (encoder norms).
-fn norm_no_bias(w: &Weights, prefix: &str, cfg: &EncoderConfig, device: &Device) -> LayerNorm {
+fn norm_no_bias<W: crate::weights::WeightSource>(w: &W, prefix: &str, cfg: &EncoderConfig, device: &Device) -> LayerNorm {
     let mut ln = LayerNormConfig::new(cfg.hidden_size)
         .with_epsilon(cfg.epsilon)
         .with_bias(false)
@@ -524,7 +523,7 @@ fn split_qkv(qkv: Tensor<3>, d: usize, n_heads: usize) -> (Tensor<4>, Tensor<4>,
 
 impl Laya {
     /// Load the model from checkpoint tensors (typed-decisions layout keys).
-    pub fn load(w: &Weights, ecfg: &EncoderConfig, head_layers: usize, device: &Device) -> Self {
+    pub fn load<W: crate::weights::WeightSource>(w: &W, ecfg: &EncoderConfig, head_layers: usize, device: &Device) -> Self {
         let d = ecfg.hidden_size;
         let layers = (0..ecfg.num_layers)
             .map(|i| {

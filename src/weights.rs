@@ -2,6 +2,9 @@
 
 use burn::tensor::{Device, FloatDType, Tensor, TensorData};
 
+/// The tensor surface Laya::load consumes: implemented by the safetensors
+/// reader (Weights) and by the burnpack skeleton (crate::skeleton).
+
 /// Compute dtype for loaded weights: LAYA_DTYPE=bf16 selects BF16 compute,
 /// anything else stays F32 (the parity-verified default).
 pub fn compute_dtype() -> FloatDType {
@@ -12,6 +15,13 @@ pub fn compute_dtype() -> FloatDType {
     }
 }
 use safetensors::SafeTensors;
+
+pub trait WeightSource {
+    fn t1(&self, name: &str, device: &Device) -> Tensor<1>;
+    fn t2(&self, name: &str, device: &Device) -> Tensor<2>;
+    fn has(&self, name: &str) -> bool;
+    fn max_layer_index(&self) -> usize;
+}
 
 /// A safetensors file held in memory with lazy tensor views.
 pub struct Weights {
@@ -38,6 +48,21 @@ fn f16_bits_to_f32(h: u16) -> f32 {
         _ => sign | ((exp - 15 + 127) << 23) | (frac << 13),
     };
     f32::from_bits(bits)
+}
+
+impl WeightSource for Weights {
+    fn t1(&self, name: &str, device: &Device) -> Tensor<1> {
+        Weights::t1(self, name, device)
+    }
+    fn t2(&self, name: &str, device: &Device) -> Tensor<2> {
+        Weights::t2(self, name, device)
+    }
+    fn has(&self, name: &str) -> bool {
+        Weights::has(self, name)
+    }
+    fn max_layer_index(&self) -> usize {
+        Weights::max_layer_index(self)
+    }
 }
 
 impl Weights {

@@ -158,6 +158,73 @@ impl RlAgent {
         Self { model, ropes, tok, max_len, head_max_len, temperature, temperature_by_options, clamped_temperatures }
     }
 
+    /// Load from a burnpack export (model.mpk + model.mpk.json sidecar) with
+    /// NO safetensors access: the sidecar carries the geometry, a zeros-only
+    /// skeleton builds the module tree, and the burnpack record overwrites
+    /// every parameter. Tokenizer + agent config still come from the
+    /// directory (they are configuration, not weights).
+    pub fn load_burnpack(model_dir: &str, device: &Device) -> Self {
+        use crate::calibration::Calibration;
+        use crate::skeleton::{SkeletonSpec, SkeletonWeights};
+        use burn::module::Module;
+
+        let spec: SkeletonSpec = serde_json::from_str(
+            &std::fs::read_to_string(format!("{model_dir}/model.mpk.json")).expect("sidecar"),
+        )
+        .expect("parse sidecar");
+        let ecfg = crate::model::EncoderConfig {
+            hidden_size: spec.hidden,
+            num_layers: spec.layers,
+            num_heads: spec.hidden / 64,
+            intermediate_size: spec.intermediate,
+            window_size: 128,
+            global_every: 3,
+            max_sequence_length: 1088,
+            rope_theta_full: 160_000.0,
+            rope_theta_sliding: spec.sliding_theta,
+            epsilon: 1e-5,
+        };
+        let skel = SkeletonWeights::new(&spec);
+        let model = crate::model::Laya::load(&skel, &ecfg, spec.head_layers, device);
+        let record =
+            burn::store::ModuleRecord::load(format!("{model_dir}/model.mpk")).expect("read burnpack");
+        let model = model.load_record(record);
+        let ropes = crate::model::Ropes::new(&ecfg, device);
+
+        let cfg: Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{model_dir}/rl_agent_config.json")).unwrap(),
+        )
+        .unwrap();
+        let max_len = cfg["max_len"].as_u64().unwrap() as usize;
+        let head_max_len = cfg["head_max_len"].as_u64().unwrap() as usize;
+        let temperature = [
+            Calibration::clamp_temperature(cfg["temperature"][0].as_f64().unwrap_or(1.0)),
+            Calibration::clamp_temperature(cfg["temperature"][1].as_f64().unwrap_or(1.0)),
+            Calibration::clamp_temperature(cfg["temperature"][2].as_f64().unwrap_or(1.0)),
+        ];
+        let temperature_by_options: Vec<(String, f64)> = cfg["temperature_by_options"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| {
+                        (k.clone(), Calibration::clamp_temperature(v.as_f64().unwrap_or(1.0)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tok = crate::tokenizer::LayaTokenizer::load(&format!("{model_dir}/tokenizer/tokenizer.json"));
+        Self {
+            model,
+            ropes,
+            tok,
+            max_len,
+            head_max_len,
+            temperature,
+            temperature_by_options,
+            clamped_temperatures: Vec::new(),
+        }
+    }
+
     /// Create the opt-in graph capture/replay engine (LAYA_REPLAY=1).
     pub fn replay_engine(&self, device: &Device) -> ReplayEngine<'_> {
         ReplayEngine::new(self, device)
