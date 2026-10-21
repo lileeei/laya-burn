@@ -77,6 +77,14 @@ async fn models(State(state): State<std::sync::Arc<AppState>>) -> Json<Value> {
 }
 
 fn render_options(qtype: &str, criteria: &Value) -> Vec<String> {
+    // Criterion text must be the PLAIN string, not serde Display
+    // (which quotes it); non-strings fall back to their JSON form.
+    let text = |v: &Value| -> String {
+        match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }
+    };
     match qtype {
         "choice" => criteria
             .as_object()
@@ -88,7 +96,7 @@ fn render_options(qtype: &str, criteria: &Value) -> Vec<String> {
                         if blank {
                             label.clone()
                         } else {
-                            format!("{label}: {desc}")
+                            format!("{label}: {}", text(desc))
                         }
                     })
                     .collect()
@@ -99,7 +107,7 @@ fn render_options(qtype: &str, criteria: &Value) -> Vec<String> {
             .map(|a| {
                 a.iter()
                     .enumerate()
-                    .map(|(i, d)| format!("level {i}: {d}"))
+                    .map(|(i, d)| format!("level {i}: {}", text(d)))
                     .collect()
             })
             .unwrap_or_default(),
