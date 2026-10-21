@@ -1,0 +1,206 @@
+{
+ "af": {
+  "n": 100,
+  "accuracy": 0.32
+ },
+ "am": {
+  "n": 100,
+  "accuracy": 0.16
+ },
+ "ar": {
+  "n": 100,
+  "accuracy": 0.13
+ },
+ "az": {
+  "n": 100,
+  "accuracy": 0.08
+ },
+ "bn": {
+  "n": 100,
+  "accuracy": 0.13
+ },
+ "cy": {
+  "n": 100,
+  "accuracy": 0.09
+ },
+ "da": {
+  "n": 100,
+  "accuracy": 0.34
+ },
+ "de": {
+  "n": 100,
+  "accuracy": 0.41
+ },
+ "el": {
+  "n": 100,
+  "accuracy": 0.12
+ },
+ "en": {
+  "n": 100,
+  "accuracy": 0.79
+ },
+ "es": {
+  "n": 100,
+  "accuracy": 0.51
+ },
+ "fa": {
+  "n": 100,
+  "accuracy": 0.18
+ },
+ "fi": {
+  "n": 100,
+  "accuracy": 0.16
+ },
+ "fr": {
+  "n": 100,
+  "accuracy": 0.65
+ },
+ "he": {
+  "n": 100,
+  "accuracy": 0.04
+ },
+ "hi": {
+  "n": 100,
+  "accuracy": 0.1
+ },
+ "hu": {
+  "n": 100,
+  "accuracy": 0.09
+ },
+ "hy": {
+  "n": 100,
+  "accuracy": 0.09
+ },
+ "id": {
+  "n": 100,
+  "accuracy": 0.32
+ },
+ "is": {
+  "n": 100,
+  "accuracy": 0.11
+ },
+ "it": {
+  "n": 100,
+  "accuracy": 0.34
+ },
+ "ja": {
+  "n": 100,
+  "accuracy": 0.53
+ },
+ "jv": {
+  "n": 100,
+  "accuracy": 0.15
+ },
+ "ka": {
+  "n": 100,
+  "accuracy": 0.1
+ },
+ "km": {
+  "n": 100,
+  "accuracy": 0.04
+ },
+ "kn": {
+  "n": 100,
+  "accuracy": 0.09
+ },
+ "ko": {
+  "n": 100,
+  "accuracy": 0.1
+ },
+ "lv": {
+  "n": 100,
+  "accuracy": 0.08
+ },
+ "ml": {
+  "n": 100,
+  "accuracy": 0.11
+ },
+ "mn": {
+  "n": 100,
+  "accuracy": 0.1
+ },
+ "ms": {
+  "n": 100,
+  "accuracy": 0.26
+ },
+ "my": {
+  "n": 100,
+  "accuracy": 0.12
+ },
+ "nb": {
+  "n": 100,
+  "accuracy": 0.29
+ },
+ "nl": {
+  "n": 100,
+  "accuracy": 0.43
+ },
+ "pl": {
+  "n": 100,
+  "accuracy": 0.21
+ },
+ "pt": {
+  "n": 100,
+  "accuracy": 0.48
+ },
+ "ro": {
+  "n": 100,
+  "accuracy": 0.23
+ },
+ "ru": {
+  "n": 100,
+  "accuracy": 0.34
+ },
+ "sl": {
+  "n": 100,
+  "accuracy": 0.16
+ },
+ "sq": {
+  "n": 100,
+  "accuracy": 0.19
+ },
+ "sv": {
+  "n": 100,
+  "accuracy": 0.32
+ },
+ "sw": {
+  "n": 100,
+  "accuracy": 0.09
+ },
+ "ta": {
+  "n": 100,
+  "accuracy": 0.1
+ },
+ "te": {
+  "n": 100,
+  "accuracy": 0.08
+ },
+ "th": {
+  "n": 100,
+  "accuracy": 0.11
+ },
+ "tl": {
+  "n": 100,
+  "accuracy": 0.3
+ },
+ "tr": {
+  "n": 100,
+  "accuracy": 0.11
+ },
+ "ur": {
+  "n": 100,
+  "accuracy": 0.1
+ },
+ "vi": {
+  "n": 100,
+  "accuracy": 0.08
+ },
+ "zh-CN": {
+  "n": 100,
+  "accuracy": 0.57
+ },
+ "zh-TW": {
+  "n": 100,
+  "accuracy": 0.43
+ }
+}
