@@ -474,7 +474,18 @@ impl Router {
     }
 
     fn load(dir: &str, device: &Device) -> RlAgent {
-        RlAgent::load(dir, device)
+        // LAYA_BURNPACK=1 (or burnpack present and safetensors absent) loads
+        // the burn-native export: ~0.9s vs ~9s, identical answers.
+        let has_burnpack = std::path::Path::new(&format!("{dir}/model.mpk")).is_file()
+            && std::path::Path::new(&format!("{dir}/model.mpk.json")).is_file();
+        let force_burnpack = std::env::var("LAYA_BURNPACK").as_deref() == Ok("1");
+        let no_safetensors = !std::path::Path::new(&format!("{dir}/model.safetensors")).is_file();
+        if has_burnpack && (force_burnpack || no_safetensors) {
+            eprintln!("laya: loading {dir} from burnpack");
+            RlAgent::load_burnpack(dir, device)
+        } else {
+            RlAgent::load(dir, device)
+        }
     }
 
     /// Route one request and run it on the chosen checkpoint. The agent for
