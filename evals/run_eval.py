@@ -72,10 +72,28 @@ def main():
     n_q = 0
     acc_ours = acc_ref = agree = 0
     mismatches = []
+    # Calibration-metric inputs (official methodology: ECE(15 bins), NLL,
+    # Brier, accuracy at 50% coverage) over the top-choice probability.
+    import math
+    probs_conf = []  # (confidence, correct) for laya-burn answers
+
+    def conf_of(ans):
+        if ans["type"] == "choice":
+            return max(ans["probabilities"].values())
+        if ans["type"] == "score":
+            return ans["confidence"]
+        return max(ans["noul"], 1.0 - ans["noul"])
+    # second server pass capturing full answers for calibration metrics
+    full_answers = []
+    for item in items:
+        full_answers.append(ask_server(item))
+
     for i, item in enumerate(items):
         for qid, expected in item["expected"].items():
             n_q += 1
             o, r = ours[i][qid], refs[i][qid]
+            correct = o == expected
+            probs_conf.append((conf_of(full_answers[i][qid]), correct))
             if o == expected:
                 acc_ours += 1
             if r == expected:
@@ -93,6 +111,28 @@ def main():
         print("mismatches (i, qid, expected, reference, ours):")
         for m in mismatches:
             print(" ", m)
+
+    # --- Official calibration metrics (eval/results.json methodology) ---
+    if probs_conf:
+        # ECE, 15 equal bins
+        ece = 0.0
+        for b in range(15):
+            lo, hi = b / 15.0, (b + 1) / 15.0
+            sel = [(c, k) for c, k in probs_conf if lo < c <= hi or (b == 0 and c == 0)]
+            if sel:
+                acc_b = sum(k for _, k in sel) / len(sel)
+                conf_b = sum(c for c, _ in sel) / len(sel)
+                ece += (len(sel) / n_q) * abs(acc_b - conf_b)
+        # NLL (top-choice, natural log) and Brier
+        nll = -sum(math.log(max(c, 1e-12)) if k else math.log(max(1 - c, 1e-12))
+                   for c, k in probs_conf) / n_q
+        brier = sum((c - (1.0 if k else 0.0)) ** 2 for c, k in probs_conf) / n_q
+        # accuracy at 50% coverage (highest-confidence half)
+        ranked = sorted(probs_conf, key=lambda x: -x[0])
+        half = max(1, n_q // 2)
+        acc50 = sum(k for _, k in ranked[:half]) / half
+        print(f"ECE(15): {ece:.3f}   NLL: {nll:.3f}   Brier: {brier:.3f}")
+        print(f"accuracy at 50% coverage: {acc50:.3f}")
 
 
 if __name__ == "__main__":
