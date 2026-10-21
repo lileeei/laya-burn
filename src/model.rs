@@ -302,6 +302,150 @@ impl Ropes {
 }
 
 /// Attention over one layer's q/k/v with additive mask.
+/// Blocked sliding-window attention, mathematically equal to masking |i-j| > w2:
+/// the sequence is cut into overlapping blocks (query stride nq, block width
+/// nq + 2*w2). Each block runs a normal masked attention over its local key
+/// range; the block window mask keeps exactly the in-window pairs. Output
+/// centers are concatenated back. Pure tensor ops - no custom kernel, no
+/// patched dependencies. Compute: (nq + 2*w2) * S instead of S^2.
+#[allow(clippy::too_many_arguments)]
+fn attention_blocked(
+    q: Tensor<4>,
+    k: Tensor<4>,
+    v: Tensor<4>,
+    attention_mask: &Tensor<2, Int>,
+    w2: usize,
+    device: &Device,
+) -> Tensor<3> {
+    let [batch, n_heads, seq, head_dim] = q.dims();
+    let nq = (w2 + 1).max(64); // query stride per block (>= window half)
+    let width = nq + 2 * w2; // key span per block
+    let n_blocks = seq.div_ceil(nq);
+
+    let zeros_k = Tensor::<1>::zeros([width * head_dim], device).cast(q.dtype());
+
+    // Key/value blocks: block c covers global keys [c*nq - w2, c*nq - w2 + width)
+    // clamped to [0, seq) and zero-padded to the fixed width.
+    let mut k_blocks = Vec::new();
+    let mut v_blocks = Vec::new();
+    for c in 0..n_blocks {
+        let start = (c * nq).saturating_sub(w2);
+        let end = (start + width).min(seq);
+        let len = end - start;
+        let kb = k.clone().slice([0..batch, 0..n_heads, start..end, 0..head_dim]);
+        let vb = v.clone().slice([0..batch, 0..n_heads, start..end, 0..head_dim]);
+        let pad_len = width - len;
+        let padding = if pad_len > 0 {
+            Some(
+                zeros_k
+                    .clone()
+                    .slice([0..pad_len * head_dim])
+                    .reshape([1, 1, pad_len, head_dim])
+                    .repeat_dim(0, batch)
+                    .repeat_dim(1, n_heads),
+            )
+        } else {
+            None
+        };
+        let k_block = match &padding {
+            Some(p) => Tensor::cat(vec![kb, p.clone()], 2),
+            None => kb,
+        };
+        let v_block = match &padding {
+            Some(p) => Tensor::cat(vec![vb, p.clone()], 2),
+            None => vb,
+        };
+        k_blocks.push(k_block);
+        v_blocks.push(v_block);
+    }
+    // [n_blocks, batch, heads, width, dim] -> [batch * n_blocks, heads, width, dim]
+    let k_blk = Tensor::cat(k_blocks, 0).reshape([n_blocks, batch, n_heads, width, head_dim]);
+    let v_blk = Tensor::cat(v_blocks, 0).reshape([n_blocks, batch, n_heads, width, head_dim]);
+    let k_blk = k_blk
+        .swap_dims(0, 1)
+        .reshape([batch * n_blocks, n_heads, width, head_dim]);
+    let v_blk = v_blk
+        .swap_dims(0, 1)
+        .reshape([batch * n_blocks, n_heads, width, head_dim]);
+
+    // Query blocks: block c covers global queries [c*nq, c*nq + nq), zero-padded.
+    let mut q_blocks = Vec::new();
+    for c in 0..n_blocks {
+        let start = c * nq;
+        let end = (start + nq).min(seq);
+        let len = end - start;
+        let qb = q.clone().slice([0..batch, 0..n_heads, start..end, 0..head_dim]);
+        let q_block = if len < nq {
+            let padding = zeros_k
+                .clone()
+                .slice([0..(nq - len) * head_dim])
+                .reshape([1, 1, nq - len, head_dim])
+                .repeat_dim(0, batch)
+                .repeat_dim(1, n_heads);
+            Tensor::cat(vec![qb, padding], 2)
+        } else {
+            qb
+        };
+        q_blocks.push(q_block);
+    }
+    let q_blk = Tensor::cat(q_blocks, 0).reshape([n_blocks, batch, n_heads, nq, head_dim]);
+    let q_blk = q_blk
+        .swap_dims(0, 1)
+        .reshape([batch * n_blocks, n_heads, nq, head_dim]);
+
+    // Block mask [batch * n_blocks, 1, nq, width]: true = masked.
+    // query i = c*nq + p, key j = start + o (or padding); keep iff |i - j| <= w2
+    // and j is a real token (not structural padding and not a padded input).
+    let pad_rows = attention_mask.to_data();
+    let pad_host: Vec<bool> = match pad_rows.as_slice::<i32>() {
+        Ok(v) => v.iter().map(|x| *x == 0).collect(),
+        Err(_) => pad_rows
+            .as_slice::<i64>()
+            .unwrap()
+            .iter()
+            .map(|x| *x == 0)
+            .collect(),
+    };
+    let mut mask_data = Vec::with_capacity(batch * n_blocks * nq * width);
+    for b in 0..batch {
+        for c in 0..n_blocks {
+            let start = (c * nq).saturating_sub(w2);
+            for p in 0..nq {
+                let qi = c * nq + p;
+                for o in 0..width {
+                    let kj = start + o;
+                    let masked = kj >= seq
+                        || qi >= seq
+                        || (kj as isize - qi as isize).unsigned_abs() > w2
+                        || pad_host[b * seq + kj];
+                    mask_data.push(masked);
+                }
+            }
+        }
+    }
+    let mask = Tensor::<2, Bool>::from_data(
+        burn::tensor::TensorData::new(mask_data, [batch * n_blocks * nq, width]),
+        device,
+    )
+    .reshape([batch * n_blocks, 1, nq, width]);
+
+    let out = module::attention(
+        q_blk,
+        k_blk,
+        v_blk,
+        Some(mask),
+        None,
+        burn::tensor::ops::AttentionModuleOptions::default(),
+    );
+
+    // [batch * n_blocks, heads, nq, dim] -> [batch, seq, heads * dim]
+    let out = out
+        .reshape([batch, n_blocks, n_heads, nq, head_dim])
+        .swap_dims(1, 2)
+        .reshape([batch, n_heads, n_blocks * nq, head_dim]);
+    let out = out.slice([0..batch, 0..n_heads, 0..seq, 0..head_dim]);
+    out.swap_dims(1, 2).reshape([batch, seq, n_heads * head_dim])
+}
 enum AttnMask {
     Manual(Tensor<4>),      // additive float mask (fallback comparison path)
     Bool(Tensor<4, Bool>),  // boolean mask for the fused module::attention kernel
@@ -520,7 +664,12 @@ impl Laya {
             } else {
                 AttnMask::Bool(pad_bool.clone())
             };
-            let attn_res = attention(q, k, v, n_heads, &amask);
+            let use_blocks = std::env::var("LAYA_ATTN").as_deref() == Ok("blocks") && !layer.is_global;
+            let attn_res = if use_blocks {
+                attention_blocked(q, k, v, &attention_mask, self.window_size / 2, &device)
+            } else {
+                attention(q, k, v, n_heads, &amask)
+            };
             let attn_mod_out = layer.attn_out.forward(attn_res);
             let h2 = h + attn_mod_out;
 
