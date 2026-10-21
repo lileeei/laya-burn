@@ -664,8 +664,13 @@ impl Laya {
             } else {
                 AttnMask::Bool(pad_bool.clone())
             };
-            let use_blocks = std::env::var("LAYA_ATTN").as_deref() == Ok("blocks") && !layer.is_global;
-            let attn_res = if use_blocks {
+            let attn_mode = std::env::var("LAYA_ATTN").unwrap_or_default();
+            let use_blocks = attn_mode == "blocks" && !layer.is_global;
+            let use_kernel = attn_mode == "kernel" && !layer.is_global;
+            let attn_res = if use_kernel {
+                let pad_f = attention_mask.clone().float().reshape([batch, seq]);
+                crate::window_kernel::windowed_attention(q, k, v, pad_f).swap_dims(1, 2).reshape([batch, seq, d])
+            } else if use_blocks {
                 attention_blocked(q, k, v, &attention_mask, self.window_size / 2, &device)
             } else {
                 attention(q, k, v, n_heads, &amask)
