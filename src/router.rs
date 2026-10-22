@@ -410,6 +410,8 @@ impl Router {
     /// Build a router over the local checkpoint directories ("model-english"
     /// and "model"); a missing directory disables that route. LAYA_MODEL=
     /// english|typed-decisions|auto (default auto) forces a route.
+    /// Env/filesystem adapter over [Router::with_dirs]: probes the CWD's
+    /// checkpoint directories and honors LAYA_MODEL.
     pub fn new(device: &Device) -> Self {
         let forced = match std::env::var("LAYA_MODEL").as_deref() {
             Ok("english") | Ok("en") => Some(Route::English),
@@ -421,21 +423,38 @@ impl Router {
                 None
             }
         };
+        let dir_if = |marker: &str, dir: &str| {
+            std::path::Path::new(marker).is_file().then(|| dir.to_string())
+        };
+        Self::with_dirs(
+            device,
+            (
+                dir_if("model-english/rl_agent_config.json", "model-english"),
+                dir_if("model/rl_agent_config.json", "model"),
+                dir_if("model-multilingual/rl_agent_config.json", "model-multilingual"),
+            ),
+            forced,
+        )
+    }
+
+    /// Construct over explicit checkpoint directories (english, typed,
+    /// multilingual) with an optional forced route - no CWD probing, no env:
+    /// the testable seam beneath [Router::new].
+    pub fn with_dirs(
+        device: &Device,
+        dirs: (Option<String>, Option<String>, Option<String>),
+        forced: Option<Route>,
+    ) -> Self {
+        let (english_dir, typed_dir, multilingual_dir) = dirs;
         Self {
             device: device.clone(),
-            english_dir: std::path::Path::new("model-english/rl_agent_config.json")
-                .is_file()
-                .then(|| "model-english".to_string()),
-            typed_dir: std::path::Path::new("model/rl_agent_config.json")
-                .is_file()
-                .then(|| "model".to_string()),
-            multilingual_dir: std::path::Path::new("model-multilingual/rl_agent_config.json")
-                .is_file()
-                .then(|| "model-multilingual".to_string()),
+            english_dir,
+            typed_dir,
+            multilingual_dir,
             english: RefCell::new(None),
             typed: RefCell::new(None),
             multilingual: RefCell::new(None),
-            options: crate::options::LoadOptions::from_env(),
+            options: crate::options::LoadOptions::default(),
             forced,
         }
     }
@@ -519,33 +538,48 @@ impl Router {
 
     /// Route one request and run it on the chosen checkpoint. The agent for
     /// a route is loaded on first use and kept alive for later requests.
+    fn cell_for(&self, route: Route) -> &RefCell<Option<RlAgent>> {
+        match route {
+            Route::English => &self.english,
+            Route::TypedDecisions => &self.typed,
+            Route::Multilingual => &self.multilingual,
+        }
+    }
+
+    fn dir_for(&self, route: Route) -> Option<String> {
+        match route {
+            Route::English => self.english_dir.clone(),
+            Route::TypedDecisions => self.typed_dir.clone(),
+            Route::Multilingual => self.multilingual_dir.clone(),
+        }
+    }
+
+    /// Lazily load `route`'s checkpoint into its cell. The single load site
+    /// for both predict paths (they used to duplicate the dir-resolution +
+    /// cell dance with diverging error strings).
+    fn ensure_loaded(&self, route: Route, script: &str) -> Result<(), RouterError> {
+        let cell = self.cell_for(route);
+        if cell.borrow().is_none() {
+            let dir = self.dir_for(route).ok_or_else(|| {
+                RouterError::Load(format!(
+                    "state routed to the {} checkpoint (script={script}) but its directory was not found; download it per README, or force a route with LAYA_MODEL=english|typed-decisions",
+                    route.name()
+                ))
+            })?;
+            eprintln!("laya: loading {} checkpoint from {dir} ...", route.name());
+            *cell.borrow_mut() = Some(self.load(&dir, &self.device));
+        }
+        Ok(())
+    }
+
     pub fn predict(
         &self,
         state: &Value,
         questions: &[QuestionInput],
     ) -> Result<(Route, Vec<Answer>), RouterError> {
         let (route, det) = self.route(state);
-        let cell = match route {
-            Route::English => &self.english,
-            Route::TypedDecisions => &self.typed,
-            Route::Multilingual => &self.multilingual,
-        };
-        if cell.borrow().is_none() {
-            let dir = match route {
-                Route::English => self.english_dir.clone(),
-                Route::TypedDecisions => self.typed_dir.clone(),
-                Route::Multilingual => self.multilingual_dir.clone(),
-            }
-            .ok_or_else(|| {
-                RouterError::Load(format!(
-                    "state routed to the multilingual checkpoint (script={}) but model-multilingual/ was not found; download it per README, or force a route with LAYA_MODEL=english|typed-decisions.",
-                    det.script
-                ))
-            })?;
-            eprintln!("laya: loading {} checkpoint from {dir} ...", route.name());
-            *cell.borrow_mut() = Some(self.load(&dir, &self.device));
-        }
-        let guard = cell.borrow();
+        self.ensure_loaded(route, &det.script)?;
+        let guard = self.cell_for(route).borrow();
         let agent = guard.as_ref().unwrap();
         Ok((route, agent.system_one(&self.device, state, questions, None)))
     }
@@ -582,29 +616,9 @@ impl Router {
                 .map(|i| items[*i].clone())
                 .collect();
             let outcome = (|| -> Result<Vec<Vec<Answer>>, RouterError> {
-                let cell = match route {
-                    Route::English => &self.english,
-                    Route::TypedDecisions => &self.typed,
-                    Route::Multilingual => &self.multilingual,
-                };
-                if cell.borrow().is_none() {
-                    let dir = match route {
-                        Route::English => self.english_dir.clone(),
-                        Route::TypedDecisions => self.typed_dir.clone(),
-                        Route::Multilingual => self.multilingual_dir.clone(),
-                    }
-                    .ok_or_else(|| {
-                        RouterError::Load(format!(
-                            "state routed to {} but its checkpoint directory was not found",
-                            route.name()
-                        ))
-                    })?;
-                    eprintln!("laya: loading {} checkpoint from {dir} ...", route.name());
-                    let loaded = self.load(&dir, &self.device);
-                    let _ = RefCell::new(()); // keep RefCell import used on all cfgs
-                    *cell.borrow_mut() = Some(loaded);
-                }
-                let guard = cell.borrow();
+                let det = self.route(&group[0].0).1;
+                self.ensure_loaded(*route, &det.script)?;
+                let guard = self.cell_for(*route).borrow();
                 let agent = guard.as_ref().unwrap();
                 Ok(agent.system_one_many(&self.device, &group, None))
             })();
@@ -695,5 +709,35 @@ mod tests {
         let v: Value = serde_json::json!({"user": {"msg": "用户要求退款"}, "meta": {"id": 7}});
         let d = analyse(&v);
         assert!(!d.is_english);
+    }
+}
+
+#[cfg(test)]
+mod with_dirs_tests {
+    use super::*;
+    use burn::tensor::Device;
+    use serde_json::json;
+
+    /// Routing to a checkpoint whose directory is absent surfaces a Load
+    /// error - constructible without CWD probing or env vars.
+    #[test]
+    fn predict_without_dirs_returns_load_error() {
+        let router = Router::with_dirs(&Device::default(), (None, None, None), None);
+        let err = router
+            .predict(&json!({"utterance": "用户想查天气"}), &[])
+            .expect_err("no dirs configured");
+        assert!(matches!(err, RouterError::Load(_)), "{err:?}");
+    }
+
+    /// A forced route overrides detection without any directory configured.
+    #[test]
+    fn forced_route_is_reported_before_load() {
+        let router = Router::with_dirs(
+            &Device::default(),
+            (None, None, None),
+            Some(Route::Multilingual),
+        );
+        let (route, _) = router.route(&json!("english text entirely"));
+        assert_eq!(route, Route::Multilingual);
     }
 }
