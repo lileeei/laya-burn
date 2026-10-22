@@ -132,3 +132,90 @@ fn dequantize_q8<const D: usize>(tensor: Tensor<D>) -> Tensor<D> {
         dtype => tensor.cast(dtype),
     }
 }
+
+/// Report from [export_q8]: everything a caller (binary or test) needs to
+/// assert - the round-trip checks are data, not console lines.
+#[derive(Debug)]
+pub struct PackExport {
+    pub pack_path: String,
+    pub pack_bytes: u64,
+    pub quantize_ms: u128,
+    pub reload_ms: u128,
+    /// reload(eager dequant) answers == in-memory Q8 answers.
+    pub round_trip_ok: bool,
+}
+
+/// The Q8 export pipeline (old LAYA_QUANT spike): load the f32 checkpoint,
+/// quantize with the exempted group, write model.q8.mpk plus a complete
+/// sidecar, reload through the eager-dequant path, verify bit-identical
+/// answers on a fixed probe question.
+pub fn export_q8(dir: &str, device: &Device) -> PackExport {
+    use crate::inference::{QuestionInput, RlAgent};
+    use burn::module::Module;
+
+    let agent = RlAgent::load(dir, device);
+    let t0 = std::time::Instant::now();
+    let q_model = quantize(agent.model.clone(), device);
+    let quantize_ms = t0.elapsed().as_millis();
+
+    let probe = QuestionInput {
+        qtype: 0,
+        instructions: "Which runtime should host the model for CPU inference in Rust?".to_string(),
+        options: vec!["burn".into(), "candle".into(), "onnxruntime".into(), "libtorch".into()],
+        keys: vec![],
+    };
+    let state = serde_json::Value::String(
+        "The user is deciding whether to run a 421M non-autoregressive decision model in Rust."
+            .to_string(),
+    );
+    let mut q_agent = RlAgent::load(dir, device);
+    q_agent.model = q_model;
+    let in_memory = q_agent.system_one(device, &state, &[probe.clone()], None);
+
+    // Sidecar: complete geometry from the live model (works for every
+    // checkpoint; the old hardcoded english values were wrong for others).
+    let sidecar = format!("{dir}/model.mpk.json");
+    if !std::path::Path::new(&sidecar).is_file() {
+        std::fs::write(
+            &sidecar,
+            serde_json::to_string_pretty(&crate::skeleton::SkeletonSpec::from_model(&q_agent.model))
+                .unwrap(),
+        )
+        .expect("write sidecar");
+    }
+    let pack_path = format!("{dir}/model.q8.mpk");
+    q_agent.model.clone().save_file(&pack_path).expect("save quantized burnpack");
+
+    let t1 = std::time::Instant::now();
+    let reloaded = RlAgent::load_burnpack_named(dir, "model.q8.mpk", device);
+    let reload_ms = t1.elapsed().as_millis();
+    let reloaded_answers = reloaded.system_one(device, &state, &[probe], None);
+    PackExport {
+        pack_path,
+        pack_bytes: std::fs::metadata(format!("{dir}/model.q8.mpk")).map(|m| m.len()).unwrap_or(0),
+        quantize_ms,
+        reload_ms,
+        round_trip_ok: format!("{in_memory:?}") == format!("{reloaded_answers:?}"),
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    /// Full Q8 export round-trip as a TEST (the old pipeline printed
+    /// PASS/CHECK to stdout from the demo binary). Skips when the checkpoint
+    /// directory is absent (CI); runs for real wherever model-english exists.
+    #[test]
+    fn q8_export_round_trip_when_checkpoint_present() {
+        let dir = "model-english";
+        for f in ["model.safetensors", "rl_agent_config.json"] {
+            if !std::path::Path::new(&format!("{dir}/{f}")).exists() {
+                eprintln!("skipping: {dir}/{f} not present");
+                return;
+            }
+        }
+        let device = burn::tensor::Device::default();
+        let report = super::export_q8(dir, &device);
+        assert!(report.pack_bytes > 300_000_000, "pack suspiciously small");
+        assert!(report.round_trip_ok, "eager-dequant reload != in-memory Q8");
+    }
+}

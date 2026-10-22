@@ -60,25 +60,6 @@ pub enum Answer {
     },
 }
 
-fn temp_bucket(qtype: usize, k: usize) -> String {
-    let name = ["choice", "score", "noul"][qtype];
-    let range = match k {
-        2 => "2".to_string(),
-        3..=5 => "3-5".to_string(),
-        6..=10 => "6-10".to_string(),
-        _ => "11+".to_string(),
-    };
-    format!("{name}:{range}")
-}
-
-fn confidence_from_probs(p: &[f32]) -> f32 {
-    if p.len() < 2 {
-        return 1.0;
-    }
-    let ent = -p.iter().map(|&x| x * x.max(1e-12).ln()).sum::<f32>();
-    1.0 - ent / (p.len() as f32).ln()
-}
-
 /// Clamp every fitted temperature to [0.5, 5.0] (official SDK behavior, issue
 /// #42): a sub-0.5 temperature would sharpen logits and overstate confidence.
 /// LAYA_UNCLAMPED=1 keeps the RAW fitted temperatures - what the official

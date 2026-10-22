@@ -44,10 +44,10 @@ script/language (`src/router.rs`, a port of the official SDK Router):
 
 ## Q8 quantized serving (recommended)
 
-Export once (writes `model.q8.mpk`, ~513MB, 3.3x smaller than the f32 burnpack):
+Export once with `laya quantize <dir>` (writes `model.q8.mpk`, ~513MB, 3.3x smaller than the f32 burnpack; legacy env `LAYA_QUANT=<dir>` still works):
 
 ```
-cargo run --release -- model-english   # with LAYA_QUANT=model-english
+cargo run --release -- quantize model-english
 ```
 
 Block-scaled Q8S (per [1,128] f32 scales) over the encoder + embeddings; the
@@ -105,8 +105,8 @@ Committed results:
 | `LAYA_MODEL` | force router route |
 | `LAYA_BURNPACK` | `q8` / `1` (f32) force a pack; unset prefers `model.q8.mpk` then `model.mpk` then safetensors |
 | `LAYA_QUANT=1` | quantize at load (same scheme as the export) |
-| `LAYA_QUANT=<dir>` | export `model.q8.mpk` for any checkpoint dir (geometry derived from the model) |
-| `LAYA_CONVERT=<dir>` | export f32 burnpack |
+| `LAYA_QUANT=<dir>` | legacy alias for `laya quantize <dir>` (`=1` remains the serve-side quantize-at-load knob) |
+| `LAYA_CONVERT=<dir>` | export f32 burnpack (legacy; prefer `laya convert <dir>`) |
 | `LAYA_DTYPE` | `bf16` / `f16` compute dtype (default f32, parity-verified) |
 | `LAYA_DEVICE` | `metal` / `wgpu` (default flex CPU) |
 | `LAYA_REPLAY=1` | graph capture/replay fast path |

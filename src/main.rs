@@ -5,10 +5,6 @@
 //! auto (default auto) forces a route. An explicit model directory argument,
 //! or no routing directories at all, keeps the original single-model path.
 
-// Declared here (not in lib.rs) so the router ships with the binary without
-// touching files outside this task's write scope; move it to lib.rs as
-// `pub mod router;` when convenient.
-
 use laya_burn::inference::{QuestionInput, RlAgent};
 use laya_burn::router::Router;
 
@@ -95,128 +91,29 @@ fn demo_state() -> serde_json::Value {
 /// LAYA_CONVERT=<dir>: checkpoint -> burn-native burnpack round trip.
 use burn::module::Module;
 
-/// LAYA_QUANT=<dir>: quantize the loaded model to Q8 (encoder + embeddings;
-/// head/norms exempt), export model.q8.mpk, and reload it through the eager
-/// dequant path - proving the 4x artifact loads in seconds with answers
-/// identical to the in-memory quantized model.
-fn quantize_spike(dir: &str, device: &burn::tensor::Device) {
-    use laya_burn::inference::{QuestionInput, RlAgent};
-
-    let t0 = std::time::Instant::now();
-    let agent = RlAgent::load(dir, device);
-    println!("f32 load: {:?}", t0.elapsed());
-
-    let t1 = std::time::Instant::now();
-    let q_model = laya_burn::quant::quantize(agent.model.clone(), device);
-    println!("quantize (exempt head/norms): {:?}", t1.elapsed());
-
-    let question = QuestionInput {
-        qtype: 0,
-        instructions: "Which runtime should host the model for CPU inference in Rust?".to_string(),
-        options: vec!["burn".into(), "candle".into(), "onnxruntime".into(), "libtorch".into()],
-        keys: vec![],
-    };
-    let state = serde_json::Value::String(
-        "The user is deciding whether to run a 421M non-autoregressive decision model in Rust.".to_string(),
-    );
-    let a1 = agent.system_one(device, &state, &[question.clone()], None);
-    println!("f32 answers:  {a1:?}");
-
-    let mut q_agent = RlAgent::load(dir, device);
-    q_agent.model = q_model;
-    let a2 = q_agent.system_one(device, &state, &[question.clone()], None);
-    println!("q8 answers:   {a2:?}");
-    let same = format!("{a1:?}") == format!("{a2:?}");
-    println!("Q8 ROUND-TRIP: {}", if same { "PASS" } else { "CHECK" });
-
-    // Export: the Q8 model saved as burnpack (i8 + scales), then reloaded
-    // through the skeleton + eager-dequant path. The geometry sidecar is
-    // shared with the f32 pack; write one when the directory has none (the
-    // ModernBERT-large geometry every Q8-quantized checkpoint here shares).
-    let sidecar = dir.to_string() + "/model.mpk.json";
-    if !std::path::Path::new(&sidecar).is_file() {
-        // Derive the geometry from the loaded model so any checkpoint works.
-        let spec = laya_burn::skeleton::SkeletonSpec::from_model(&q_agent.model);
-        std::fs::write(&sidecar, serde_json::to_string_pretty(&spec).unwrap())
-            .expect("write sidecar");
-    }
-    let qpath = dir.to_string() + "/model.q8.mpk";
-    let t2 = std::time::Instant::now();
-    q_agent.model.clone().save_file(&qpath).expect("save quantized burnpack");
-    println!("saved {}: {:?}", qpath, t2.elapsed());
-    let meta = std::fs::metadata(&qpath).expect("stat");
-    let f32_size = std::fs::metadata(dir.to_string() + "/model.mpk").map(|m| m.len()).unwrap_or(0);
-    println!(
-        "quantized burnpack size: {:.0} MB (f32 pack {:.0} MB, {:.2}x)",
-        meta.len() as f64 / 1e6,
-        f32_size as f64 / 1e6,
-        f32_size as f64 / meta.len() as f64,
-    );
-
-    let t3 = std::time::Instant::now();
-    let r_agent = RlAgent::load_burnpack_named(dir, "model.q8.mpk", device);
-    println!("q8 burnpack reload (eager dequant): {:?}", t3.elapsed());
-    let a3 = r_agent.system_one(device, &state, &[question], None);
-    println!("q8 burnpack answers: {a3:?}");
-    let same2 = format!("{a2:?}") == format!("{a3:?}");
-    println!(
-        "Q8 BURNPACK ROUND-TRIP (eager dequant == lazy kernel): {}",
-        if same2 { "PASS" } else { "CHECK" }
-    );
-}
-
-fn convert_to_burnpack(dir: &str, device: &burn::tensor::Device) {
-    use laya_burn::inference::{QuestionInput, RlAgent};
-    let t0 = std::time::Instant::now();
-    let agent = RlAgent::load(dir, device);
-    println!("safetensors load: {:?}", t0.elapsed());
-    let out = dir.to_string() + "/model.mpk";
-    let t1 = std::time::Instant::now();
-    agent.model.clone().save_file(&out).expect("save burnpack");
-    // Sidecar: complete geometry derived from the loaded model (the old
-    // hardcoded english values would write a wrong sidecar for any other
-    // checkpoint, e.g. model-multilingual's 256k vocab).
-    let spec = laya_burn::skeleton::SkeletonSpec::from_model(&agent.model);
-    std::fs::write(
-        dir.to_string() + "/model.mpk.json",
-        serde_json::to_string_pretty(&spec).unwrap(),
-    )
-    .expect("write sidecar");
-    println!("saved {} + sidecar: {:?}", out, t1.elapsed());
-
-    // Reload with NO safetensors access: skeleton from the sidecar, weights
-    // from the burnpack (eager record path - Module::load_file's lazy wrapper
-    // hangs the first forward).
-    let t2 = std::time::Instant::now();
-    let agent2 = RlAgent::load_burnpack(dir, device);
-    println!("burnpack-only reload: {:?}", t2.elapsed());
-
-    // Round-trip proof: the same question through both agents must agree.
-    let question = QuestionInput {
-        qtype: 0,
-        instructions: "Which runtime should host the model for CPU inference in Rust?".to_string(),
-        options: vec!["burn".into(), "candle".into(), "onnxruntime".into(), "libtorch".into()],
-        keys: vec![],
-    };
-    let state = serde_json::Value::String(
-        "The user is deciding whether to run a 421M non-autoregressive decision model in Rust.".to_string(),
-    );
-    let a1 = agent.system_one(device, &state, &[question.clone()], None);
-    let a2 = agent2.system_one(device, &state, &[question], None);
-    println!("round-trip original:  {a1:?}");
-    println!("round-trip burnpack:  {a2:?}");
-    let same = format!("{a1:?}") == format!("{a2:?}");
-    println!("ROUND-TRIP: {}", if same { "PASS" } else { "FAIL" });
-}
-
 fn main() {
+    // Legacy env triggers (kept for compatibility; subcommands are primary).
     if let Ok(dir) = std::env::var("LAYA_QUANT") {
-        quantize_spike(&dir, &pick_device());
+        assert_ne!(dir, "1", "LAYA_QUANT=1 is a serve-side quantize-at-load knob; here LAYA_QUANT=<dir> exports a Q8 pack");
+        run_quantize(&dir);
         return;
     }
     if let Ok(dir) = std::env::var("LAYA_CONVERT") {
-        convert_to_burnpack(&dir, &pick_device());
+        run_convert(&dir);
         return;
+    }
+    match std::env::args().nth(1).as_deref() {
+        Some("quantize") => {
+            let dir = std::env::args().nth(2).expect("usage: laya quantize <dir>");
+            run_quantize(&dir);
+            return;
+        }
+        Some("convert") => {
+            let dir = std::env::args().nth(2).expect("usage: laya convert <dir>");
+            run_convert(&dir);
+            return;
+        }
+        _ => {}
     }
     let arg_dir = std::env::args().nth(1);
     let device = pick_device();
@@ -322,4 +219,29 @@ fn run_single(model_dir: &str, device: &Device) {
             println!("Q{i}: {answer:?}");
         }
     }
+}
+
+fn run_quantize(dir: &str) {
+    let r = laya_burn::quant::export_q8(dir, &pick_device());
+    println!(
+        "q8 pack: {} ({:.0} MB), quantize {} ms, reload {} ms, round-trip {}",
+        r.pack_path,
+        r.pack_bytes as f64 / 1e6,
+        r.quantize_ms,
+        r.reload_ms,
+        if r.round_trip_ok { "PASS" } else { "CHECK" }
+    );
+    assert!(r.round_trip_ok, "Q8 round-trip failed");
+}
+
+fn run_convert(dir: &str) {
+    let r = laya_burn::export::export_burnpack(dir, &pick_device());
+    println!(
+        "burnpack: {} ({:.0} MB), reload {} ms, round-trip {}",
+        r.pack_path,
+        r.pack_bytes as f64 / 1e6,
+        r.reload_ms,
+        if r.round_trip_ok { "PASS" } else { "CHECK" }
+    );
+    assert!(r.round_trip_ok, "burnpack round-trip failed");
 }

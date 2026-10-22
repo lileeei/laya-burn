@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 use burn::module::{Module, ModuleMapper, Param};
+use burn::tensor::Device;
 use burn::tensor::Tensor;
 use safetensors::tensor::TensorView;
 
@@ -135,4 +136,55 @@ pub fn export_safetensors(model: &Laya, temperature: [f32; 3], path: &str) -> us
     safetensors::serialize_to_file(&views, None::<HashMap<String, String>>, std::path::Path::new(path))
         .expect("write safetensors");
     n
+}
+
+/// Report from [export_burnpack].
+#[derive(Debug)]
+pub struct BurnpackExport {
+    pub pack_path: String,
+    pub pack_bytes: u64,
+    pub reload_ms: u128,
+    /// burnpack reload answers == original safetensors answers.
+    pub round_trip_ok: bool,
+}
+
+/// The f32 burnpack export pipeline (old LAYA_CONVERT): checkpoint ->
+/// model.mpk + complete sidecar, then a skeleton reload with NO safetensors
+/// access, answers compared on a fixed probe question.
+pub fn export_burnpack(dir: &str, device: &Device) -> BurnpackExport {
+    use crate::inference::{QuestionInput, RlAgent};
+    use burn::module::Module;
+
+    let agent = RlAgent::load(dir, device);
+    let pack_path = format!("{dir}/model.mpk");
+    agent.model.clone().save_file(&pack_path).expect("save burnpack");
+    std::fs::write(
+        format!("{dir}/model.mpk.json"),
+        serde_json::to_string_pretty(&crate::skeleton::SkeletonSpec::from_model(&agent.model))
+            .unwrap(),
+    )
+    .expect("write sidecar");
+
+    let probe = QuestionInput {
+        qtype: 0,
+        instructions: "Which runtime should host the model for CPU inference in Rust?".to_string(),
+        options: vec!["burn".into(), "candle".into(), "onnxruntime".into(), "libtorch".into()],
+        keys: vec![],
+    };
+    let state = serde_json::Value::String(
+        "The user is deciding whether to run a 421M non-autoregressive decision model in Rust."
+            .to_string(),
+    );
+    let original = agent.system_one(device, &state, &[probe.clone()], None);
+
+    let t0 = std::time::Instant::now();
+    let reloaded = RlAgent::load_burnpack(dir, device);
+    let reload_ms = t0.elapsed().as_millis();
+    let answers = reloaded.system_one(device, &state, &[probe], None);
+    BurnpackExport {
+        pack_bytes: std::fs::metadata(&pack_path).map(|m| m.len()).unwrap_or(0),
+        pack_path,
+        reload_ms,
+        round_trip_ok: format!("{original:?}") == format!("{answers:?}"),
+    }
 }
