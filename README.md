@@ -143,13 +143,16 @@ PyTorch reference with strict=True. Verified end to end on
 zh_short_commands (18 labeled Chinese commands): multilingual 0.611 -> 1.0
 accuracy, ECE 0.244 -> 0.004.
 
-Known deviation: the official default loss is RLCD (policy gradient over
-Gaussian-noised logits); this port's policy-gradient term is not yet
-faithful - whole-batch ablations show its loss RISING while the CE term
-alone converges, so TrainConfig defaults to SoftCe until a gradient-parity
-harness (fixed batch, PyTorch reference gradients) pins it down. The
-official effective batch is also 64 via grad accumulation; this port steps
-per micro-batch.
+The RLCD objective is gradient-verified against the PyTorch reference: a
+committed fixed batch (tests/fixtures/grad_parity) pins loss AND
+d(loss)/d(logits) to 1e-5 - the parity harness caught two real bugs, the
+advantage std measured over the per-row-CENTERED rewards (not the raw ones)
+and burn 0.22's repeat_dim backward misrouting through reshape (now tracked
+slices + cat). With RLCD restored to the official default, the zh_commands
+acceptance run reaches 0.944 accuracy / ECE 0.068 (CE-only memorization
+reaches 1.0 - RLCD's exploration noise costs a little on an 18-case set).
+Remaining deviation: the official effective batch is 64 via grad
+accumulation; this port steps per micro-batch.
 
 ## WebAssembly
 

@@ -59,11 +59,7 @@ impl Default for TrainConfig {
             lr: 2.5e-5,
             weight_decay: 0.01,
             grad_clip: Some(1.0),
-            // Official default is Rlcd; this port's policy-gradient term is
-            // NOT yet faithful (whole-batch runs show the loss RISING while
-            // the CE term alone converges - see README). SoftCe is the
-            // verified path until a gradient-parity harness pins the pg bug.
-            loss: LossKind::SoftCe,
+            loss: LossKind::Rlcd,
             rl_samples: 4,
             sigma_start: 0.4,
             sigma_end: 0.1,
@@ -559,6 +555,122 @@ fn soft_ce(logits: &Tensor<2>, target: &Tensor<2>, mask: &Tensor<2>) -> Tensor<1
     (target.clone() * logp * mask.clone()).sum_dim(1).mean().mul_scalar(-1.0)
 }
 
+/// The RLCD policy-gradient core with the noise INJECTED ([rows*samples, cols]
+/// layout, matching the internal generator): advantage-weighted Gaussian
+/// log-density of the shared noise plus soft CE. Exposed for the
+/// gradient-parity harness against the PyTorch reference.
+pub fn rlcd_core(
+    logits: &Tensor<2>,
+    target: &Tensor<2>,
+    mask: &Tensor<2>,
+    row_qtypes: &[usize],
+    eps_flat: &Tensor<2>,
+    sigma: f32,
+    samples: usize,
+    w_sph: f32,
+    w_rps: f32,
+) -> Tensor<1> {
+    let rows = logits.dims()[0];
+    let cols = logits.dims()[1];
+    let mut total = soft_ce(logits, target, mask);
+    if samples == 0 || sigma <= 0.0 {
+        return total;
+    }
+    let z_host = logits.clone().detach().into_data();
+    let z = z_host.as_slice::<f32>().unwrap_or(&[]).to_vec();
+    let t_host = target.clone().detach().into_data();
+    let t = t_host.as_slice::<f32>().unwrap_or(&[]).to_vec();
+    let m_host = mask.clone().detach().into_data();
+    let m = m_host.as_slice::<f32>().unwrap_or(&[]).to_vec();
+    let eps_host = eps_flat.clone().detach().into_data();
+    let eps_all = eps_host.as_slice::<f32>().unwrap_or(&[]).to_vec();
+
+    // Rewards [rows x samples], then advantages: PER-ROW centering, but the
+    // std is GLOBAL over all rows*samples - official `adv.std()` with no dim
+    // pools the whole tensor. Per-row std (the earlier port) amplifies
+    // numerical noise on rows whose rewards barely differ.
+    let mut all_rewards = vec![0.0f32; rows * samples];
+    for r in 0..rows {
+        for s_idx in 0..samples {
+            let base = (r * samples + s_idx) * cols;
+            let z_s: Vec<f32> = (0..cols).map(|c| z[r * cols + c] + eps_all[base + c]).collect();
+            all_rewards[r * samples + s_idx] = proper_reward_host(
+                &z_s,
+                &t[r * cols..(r + 1) * cols],
+                &m[r * cols..(r + 1) * cols],
+                row_qtypes[r],
+                w_sph,
+                w_rps,
+            );
+        }
+    }
+    let mut adv_w = vec![0.0f32; rows * samples];
+    {
+        // Official: adv = r - r.mean(0); adv / (adv.std() + 1e-6) - the std
+        // is over the PER-ROW-CENTERED tensor (global, sample std), which is
+        // smaller than the raw rewards' std. Center first, then measure.
+        let mut centered = vec![0.0f32; rows * samples];
+        for r in 0..rows {
+            let mean = (0..samples).map(|s_idx| all_rewards[r * samples + s_idx]).sum::<f32>()
+                / samples as f32;
+            for s_idx in 0..samples {
+                centered[r * samples + s_idx] = all_rewards[r * samples + s_idx] - mean;
+            }
+        }
+        let n = centered.len() as f32;
+        let global_var = if centered.len() > 1 {
+            let gmean = centered.iter().sum::<f32>() / n;
+            centered.iter().map(|x| (x - gmean).powi(2)).sum::<f32>() / (n - 1.0)
+        } else {
+            0.0
+        };
+        let global_std = global_var.sqrt() + 1e-6;
+        for (a, c) in adv_w.iter_mut().zip(centered) {
+            *a = c / global_std;
+        }
+    }
+    let adv = Tensor::<1>::from_data(
+        burn::tensor::TensorData::new(adv_w, [rows * samples]),
+        &logits.device(),
+    );
+    // z_s - logits, with z_const = detached logits taken OUTSIDE the graph:
+    // the only tracked operand is `logits`, so the backward is exactly
+    // d logp / d logits = eps / sigma^2 (verified against the reference).
+    // repeat_dim tiles BLOCK-wise; unsqueeze to [R,1,C] so dim-1 tiling
+    // interleaves each row's copies, matching the eps layout [r*S+s].
+    let z_const = logits.clone().detach();
+    // Build [r*S+s, C] by CONCATENATING tracked row slices - repeat_dim's
+    // backward misroutes gradients through the reshape (parity-verified:
+    // forward exact, gradient wrong; slice+cat is exact in both).
+    let mut z_parts = Vec::with_capacity(rows * samples);
+    let mut l_parts = Vec::with_capacity(rows * samples);
+    for r in 0..rows {
+        for _s in 0..samples {
+            z_parts.push(z_const.clone().slice([r..r + 1, 0..cols]));
+            l_parts.push(logits.clone().slice([r..r + 1, 0..cols]));
+        }
+    }
+    let z_rows = Tensor::cat(z_parts, 0);
+    let l_rows = Tensor::cat(l_parts, 0);
+    let diff = eps_flat.clone() + z_rows - l_rows;
+    // square via self-multiply (trivial backward), not powf
+    let sq = diff.clone() * diff;
+    let logp = sq.sum_dim(1).mul_scalar(-1.0 / (2.0 * sigma * sigma));
+    let logp = logp.reshape([rows * samples]);
+    if std::env::var("LAYA_PARITY_DEBUG").is_ok() {
+        let av: Vec<f32> = adv.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+        let lp: Vec<f32> = logp.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+        let avb: Vec<u8> = av.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let lpb: Vec<u8> = lp.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write("/tmp/grad_parity/rust_adv.f32", avb).unwrap();
+        std::fs::write("/tmp/grad_parity/rust_logp.f32", lpb).unwrap();
+    }
+    let pg = (adv * logp).mean().mul_scalar(-1.0);
+    total + pg
+}
+
+/// The full RLCD objective with internally-sampled noise (Box-Muller from a
+/// fixed-ish xorshift stream, projected onto each row's options).
 fn rlcd_loss(
     logits: &Tensor<2>,
     target: &Tensor<2>,
@@ -569,22 +681,8 @@ fn rlcd_loss(
     w_sph: f32,
     w_rps: f32,
 ) -> Tensor<1> {
-    // Policy-gradient over Gaussian-noised logits (advantage-weighted
-    // log-density, reward under no grad) + soft CE - the notebook objective.
     let rows = logits.dims()[0];
     let cols = logits.dims()[1];
-    let mut total = soft_ce(logits, target, mask);
-    if samples == 0 || sigma <= 0.0 {
-        return total;
-    }
-    // gather z-samples host-side (small batches), reward them, then weight
-    // the differentiable gaussian log-density of the shared noise.
-    let z_host = logits.clone().detach().into_data();
-    let z = z_host.as_slice::<f32>().unwrap_or(&[]).to_vec();
-    let t_host = target.clone().detach().into_data();
-    let t = t_host.as_slice::<f32>().unwrap_or(&[]).to_vec();
-    let m_host = mask.clone().detach().into_data();
-    let m = m_host.as_slice::<f32>().unwrap_or(&[]).to_vec();
     let q_host = qtypes.clone().into_data();
     let row_qtypes: Vec<usize> = q_host
         .as_slice::<i32>()
@@ -592,74 +690,42 @@ fn rlcd_loss(
         .iter()
         .map(|&q| q as usize)
         .collect();
-    let mut adv_w = vec![0.0f32; rows * samples];
-    let mut eps_all = vec![0.0f32; rows * samples * cols];
     let mut rng: u64 = 0x9E3779B97F4A7C15;
     let mut next = || {
         rng ^= rng << 13;
         rng ^= rng >> 7;
         rng ^= rng << 17;
-        // Box-Muller
         let u1 = ((rng >> 11) as f64 / (1u64 << 53) as f64).max(1e-12);
-        let u2 = ((rng >> 11) as f64 / (1u64 << 53) as f64);
+        let u2 = (rng >> 11) as f64 / (1u64 << 53) as f64;
         ((-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()) as f32
     };
+    let mut eps_all = vec![0.0f32; rows * samples * cols];
+    let m_host = mask.clone().detach().into_data();
+    let m = m_host.as_slice::<f32>().unwrap_or(&[]).to_vec();
     for r in 0..rows {
         let k = m[r * cols..(r + 1) * cols].iter().sum::<f32>().max(1.0) as usize;
-        // rewards per sample
-        let mut rewards = vec![0.0f32; samples];
-        for s in 0..samples {
-            let mut eps = vec![0.0f32; cols];
+        for s_idx in 0..samples {
+            let base = (r * samples + s_idx) * cols;
             let mut sum = 0.0f32;
             for c in 0..cols {
-                eps[c] = next() * sigma * m[r * cols + c];
-                sum += eps[c];
+                let v = next() * sigma * m[r * cols + c];
+                eps_all[base + c] = v;
+                sum += v;
             }
             for c in 0..cols {
-                eps[c] -= sum / k as f32;
-                eps[c] *= m[r * cols + c];
-                eps_all[(r * samples + s) * cols + c] = eps[c];
+                eps_all[base + c] -= sum / k as f32;
+                eps_all[base + c] *= m[r * cols + c];
             }
-            let z_s: Vec<f32> =
-                (0..cols).map(|c| z[r * cols + c] + eps_all[(r * samples + s) * cols + c]).collect();
-            rewards[s] = proper_reward_host(
-                &z_s,
-                &t[r * cols..(r + 1) * cols],
-                &m[r * cols..(r + 1) * cols],
-                row_qtypes[r],
-                w_sph,
-                w_rps,
-            );
-        }
-        let mean = rewards.iter().sum::<f32>() / samples as f32;
-        let var = rewards.iter().map(|r| (r - mean).powi(2)).sum::<f32>() / samples as f32;
-        let std = var.sqrt() + 1e-6;
-        for s in 0..samples {
-            adv_w[r * samples + s] = (rewards[s] - mean) / std;
         }
     }
-    // gaussian log-density of the eps wrt logits: -(||z_detached + eps - logits||^2)/(2 sigma^2)
-    // grad flows through logits only, via the square.
     let eps = Tensor::<2>::from_data(
-        burn::tensor::TensorData::new(eps_all.clone(), [rows * samples, cols]),
+        burn::tensor::TensorData::new(eps_all, [rows * samples, cols]),
         &logits.device(),
     );
-    let adv = Tensor::<1>::from_data(
-        burn::tensor::TensorData::new(adv_w, [rows * samples]),
-        &logits.device(),
-    );
-    // (z_s - logits) = eps - (logits - z_detached): the constant side
-    // repeated per sample; grad flows through `logits` only.
-    let resid = logits.clone() - logits.clone().detach();
-    let diff = eps - resid.repeat_dim(0, samples).reshape([rows * samples, cols]);
-    let logp = diff.powf_scalar(2.0).sum_dim(1).mul_scalar(-1.0 / (2.0 * sigma * sigma));
-    let logp = logp.reshape([rows * samples]);
-    let pg = (adv * logp).mean().mul_scalar(-1.0);
-    total = total + pg;
-    total
+    rlcd_core(logits, target, mask, &row_qtypes, &eps, sigma, samples, w_sph, w_rps)
 }
 
-fn proper_reward_host(
+pub fn proper_reward_host(
     z: &[f32],
     target: &[f32],
     mask: &[f32],
@@ -752,5 +818,76 @@ mod train_tests {
         let b = split_calibration(100, 400, 0.1, 20260922);
         assert_eq!(a, b);
         assert_eq!(a.len(), 10);
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+    use burn::tensor::{Device, Tensor, TensorData};
+
+    /// Gradient parity against the PyTorch reference on a committed fixed
+    /// batch (tests/fixtures/grad_parity): the RLCD core must match the
+    /// official loss AND d(loss)/d(logits) to float tolerance. This is the
+    /// regression net for the two bugs the harness caught: advantage std
+    /// over the per-row-CENTERED tensor (not the raw rewards), and
+    /// repeat_dim's backward misrouting through reshape (replaced by
+    /// tracked slices + cat).
+    #[test]
+    fn rlcd_core_matches_pytorch_loss_and_grad() {
+        let dir = "tests/fixtures/grad_parity";
+        let meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{dir}/meta.json")).unwrap(),
+        )
+        .unwrap();
+        let rows = meta["rows"].as_u64().unwrap() as usize;
+        let cols = meta["cols"].as_u64().unwrap() as usize;
+        let samples = meta["samples"].as_u64().unwrap() as usize;
+        let sigma = meta["sigma"].as_f64().unwrap() as f32;
+        let w_sph = meta["w_sph"].as_f64().unwrap() as f32;
+        let w_rps = meta["w_rps"].as_f64().unwrap() as f32;
+        let qtype: Vec<usize> = meta["qtype"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
+        let read = |name: &str, n: usize| -> Vec<f32> {
+            let b = std::fs::read(format!("{dir}/{name}.f32")).unwrap();
+            b.chunks(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).take(n).collect()
+        };
+        let device = Device::default().autodiff();
+        let logits = Tensor::<2>::from_data(
+            TensorData::new(read("logits", rows * cols), [rows, cols]),
+            &device,
+        )
+        .autodiff()
+        .require_grad();
+        let target = Tensor::<2>::from_data(
+            TensorData::new(read("target", rows * cols), [rows, cols]),
+            &device,
+        );
+        let mask = Tensor::<2>::from_data(
+            TensorData::new(read("mask", rows * cols), [rows, cols]),
+            &device,
+        );
+        let eps = Tensor::<2>::from_data(
+            TensorData::new(read("eps", rows * samples * cols), [rows * samples, cols]),
+            &device,
+        );
+        let loss = rlcd_core(&logits, &target, &mask, &qtype, &eps, sigma, samples, w_sph, w_rps);
+        let lv = loss.clone().into_scalar::<f32>() as f64;
+        let py_loss = meta["py_loss"].as_f64().unwrap();
+        assert!((lv - py_loss).abs() < 1e-5, "loss {lv} vs py {py_loss}");
+        let grads = loss.backward();
+        let grad = logits.grad(&grads).expect("grad");
+        let gv = grad.into_data().as_slice::<f32>().unwrap().to_vec();
+        let py_grad = read("py_grad", rows * cols);
+        let max_diff = gv
+            .iter()
+            .zip(&py_grad)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_diff < 1e-5, "grad max|diff| {max_diff}");
     }
 }
