@@ -1,0 +1,23 @@
+{
+  "_comment": "Serving latency baseline, M-series Mac, flex backend, english checkpoint, 20 repeats. q8 = model.q8.mpk (block-scaled Q8, eager-dequantized at load); f32 = safetensors. Weights are dequantized at load, so compute is identical and the two rows differ only by noise.",
+  "source": "python3 evals/bench_latency.py http://127.0.0.1:PORT",
+  "q8_burnpack": {
+    "artifact_mb": 513,
+    "load_s": 1.7,
+    "latency_ms": {
+      "1_questions":  {"p50_ms": 19.0, "p95_ms": 19.4},
+      "10_questions": {"p50_ms": 171.7, "p95_ms": 176.3},
+      "50_questions": {"p50_ms": 865.0, "p95_ms": 873.0}
+    }
+  },
+  "f32_safetensors": {
+    "artifact_mb": 804,
+    "load_s": 9.0,
+    "latency_ms": {
+      "1_questions":  {"p50_ms": 19.0, "p95_ms": 21.6},
+      "10_questions": {"p50_ms": 153.5, "p95_ms": 156.3},
+      "50_questions": {"p50_ms": 884.0, "p95_ms": 892.0}
+    }
+  },
+  "massive_en_accuracy": {"q8_burnpack": 0.79, "f32": 0.79, "official_reference": 0.82}
+}

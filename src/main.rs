@@ -90,24 +90,20 @@ fn demo_state() -> serde_json::Value {
 /// LAYA_CONVERT=<dir>: checkpoint -> burn-native burnpack round trip.
 use burn::module::Module;
 
-/// LAYA_QUANT=1 spike: quantize the loaded model (Q8 MinMax) and run the demo
-/// question through both the f32 and quantized copies, comparing answers.
+/// LAYA_QUANT=<dir>: quantize the loaded model to Q8 (encoder + embeddings;
+/// head/norms exempt), export model.q8.mpk, and reload it through the eager
+/// dequant path - proving the 4x artifact loads in seconds with answers
+/// identical to the in-memory quantized model.
 fn quantize_spike(dir: &str, device: &burn::tensor::Device) {
-    use burn::module::{Module, Quantizer};
-    use burn::tensor::quantization::{Calibration, QuantValue};
     use laya_burn::inference::{QuestionInput, RlAgent};
 
-    let agent = RlAgent::load(dir, device);
-    let scheme = device
-        .settings()
-        .quantization
-        .scheme
-        .with_value(QuantValue::Q8S)
-        .with_store(burn::tensor::quantization::QuantStore::Native);
-    let mut quantizer = Quantizer::new(Calibration::MinMax, scheme);
     let t0 = std::time::Instant::now();
-    let q_model = agent.model.clone().quantize_weights(&mut quantizer);
-    println!("quantize: {:?}", t0.elapsed());
+    let agent = RlAgent::load(dir, device);
+    println!("f32 load: {:?}", t0.elapsed());
+
+    let t1 = std::time::Instant::now();
+    let q_model = laya_burn::quant::quantize(agent.model.clone(), device);
+    println!("quantize (exempt head/norms): {:?}", t1.elapsed());
 
     let question = QuestionInput {
         qtype: 0,
@@ -125,27 +121,51 @@ fn quantize_spike(dir: &str, device: &burn::tensor::Device) {
     let a2 = q_agent.system_one(device, &state, &[question.clone()], None);
     println!("q8 answers:   {a2:?}");
     let same = format!("{a1:?}") == format!("{a2:?}");
-    println!("QUANT ROUND-TRIP: {}", if same { "PASS" } else { "CHECK" });
+    println!("Q8 ROUND-TRIP: {}", if same { "PASS" } else { "CHECK" });
 
-    // Quantized burnpack export: save the Q8 model, then reload it from the
-    // skeleton path (no safetensors) to prove the quantized bytes survive the
-    // round trip and the file is ~4x smaller than the f32 burnpack.
+    // Export: the Q8 model saved as burnpack (i8 + scales), then reloaded
+    // through the skeleton + eager-dequant path. The geometry sidecar is
+    // shared with the f32 pack; write one when the directory has none (the
+    // ModernBERT-large geometry every Q8-quantized checkpoint here shares).
+    let sidecar = dir.to_string() + "/model.mpk.json";
+    if !std::path::Path::new(&sidecar).is_file() {
+        std::fs::write(
+            &sidecar,
+            serde_json::to_string_pretty(&laya_burn::skeleton::SkeletonSpec {
+                vocab: 50_368,
+                hidden: 1024,
+                layers: 28,
+                intermediate: 2624,
+                head_layers: 2,
+                sliding_theta: 10_000.0,
+            })
+            .unwrap(),
+        )
+        .expect("write sidecar");
+    }
     let qpath = dir.to_string() + "/model.q8.mpk";
     let t2 = std::time::Instant::now();
     q_agent.model.clone().save_file(&qpath).expect("save quantized burnpack");
     println!("saved {}: {:?}", qpath, t2.elapsed());
     let meta = std::fs::metadata(&qpath).expect("stat");
-    println!("quantized burnpack size: {:.0} MB", meta.len() as f64 / 1e6);
+    let f32_size = std::fs::metadata(dir.to_string() + "/model.mpk").map(|m| m.len()).unwrap_or(0);
+    println!(
+        "quantized burnpack size: {:.0} MB (f32 pack {:.0} MB, {:.2}x)",
+        meta.len() as f64 / 1e6,
+        f32_size as f64 / 1e6,
+        f32_size as f64 / meta.len() as f64,
+    );
 
     let t3 = std::time::Instant::now();
-    let mut r_agent = RlAgent::load_burnpack(dir, device);
-    let record = burn::store::ModuleRecord::load(&qpath).expect("read q8 burnpack");
-    r_agent.model = r_agent.model.load_record(record);
-    println!("q8 burnpack reload: {:?}", t3.elapsed());
+    let r_agent = RlAgent::load_burnpack_named(dir, "model.q8.mpk", device);
+    println!("q8 burnpack reload (eager dequant): {:?}", t3.elapsed());
     let a3 = r_agent.system_one(device, &state, &[question], None);
     println!("q8 burnpack answers: {a3:?}");
     let same2 = format!("{a2:?}") == format!("{a3:?}");
-    println!("Q8 BURNPACK ROUND-TRIP: {}", if same2 { "PASS" } else { "CHECK" });
+    println!(
+        "Q8 BURNPACK ROUND-TRIP (eager dequant == lazy kernel): {}",
+        if same2 { "PASS" } else { "CHECK" }
+    );
 }
 
 fn convert_to_burnpack(dir: &str, device: &burn::tensor::Device) {

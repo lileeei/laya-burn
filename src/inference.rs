@@ -174,6 +174,14 @@ impl RlAgent {
     /// every parameter. Tokenizer + agent config still come from the
     /// directory (they are configuration, not weights).
     pub fn load_burnpack(model_dir: &str, device: &Device) -> Self {
+        Self::load_burnpack_named(model_dir, "model.mpk", device)
+    }
+
+    /// Same as [RlAgent::load_burnpack] for an explicitly named pack file
+    /// (e.g. the Q8 export model.q8.mpk, which shares the f32 sidecar).
+    /// QFloat params from a quantized pack are dequantized eagerly in plain
+    /// Rust: burn's lazy per-tensor kernel dequant costs ~36s on first use.
+    pub fn load_burnpack_named(model_dir: &str, pack: &str, device: &Device) -> Self {
         use crate::calibration::Calibration;
         use crate::skeleton::{SkeletonSpec, SkeletonWeights};
         use burn::module::Module;
@@ -197,8 +205,12 @@ impl RlAgent {
         let skel = SkeletonWeights::new(&spec);
         let model = crate::model::Laya::load(&skel, &ecfg, spec.head_layers, device);
         let record =
-            burn::store::ModuleRecord::load(format!("{model_dir}/model.mpk")).expect("read burnpack");
+            burn::store::ModuleRecord::load(format!("{model_dir}/{pack}")).expect("read burnpack");
         let model = model.load_record(record);
+        let (model, ds) = crate::quant::eager_dequantize(model);
+        if ds.quantized > 0 {
+            eprintln!("laya: dequantized {}/{} params from {pack}", ds.quantized, ds.params);
+        }
         let ropes = crate::model::Ropes::new(&ecfg, device);
 
         let cfg: Value = serde_json::from_str(
