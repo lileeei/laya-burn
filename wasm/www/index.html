@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>laya-burn in the browser (wasm32 + WebGPU)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+  #status { font-weight: 600; margin: 1rem 0; }
+  pre { background: #f4f4f4; padding: 1rem; border-radius: 8px; white-space: pre-wrap; }
+  button { font-size: 1rem; padding: 0.5rem 1rem; margin-top: 0.5rem; }
+</style>
+</head>
+<body>
+<h1>laya-burn in the browser</h1>
+<p>mmBERT-base multilingual checkpoint, Q8 burnpack (377&nbsp;MB), dequantized in the
+wasm heap, inference on WebGPU via <a href="https://burn.dev">Burn</a>. No server
+round-trip per decision.</p>
+<div id="status">loading runtime&hellip;</div>
+<pre id="log"></pre>
+<script>
+for (const level of ["error", "warn", "log"]) {
+  const orig = console[level].bind(console);
+  console[level] = (...a) => { orig(...a); document.getElementById("log").textContent += "CONSOLE." + level + ": " + a.join(" ") + "\n"; };
+}
+window.addEventListener("error", e => document.getElementById("log").textContent += "JS ERROR: " + e.message + "\n");
+window.addEventListener("unhandledrejection", e => document.getElementById("log").textContent += "REJECTION: " + e.reason + "\n");
+</script>
+<script type="module">
+import init, { laya_init_q8, laya_decide } from "../pkg/laya_web.js";
+
+const status = document.getElementById("status");
+const log = (m) => document.getElementById("log").textContent += m + "\n";
+const t = () => performance.now();
+
+try {
+  await init();
+  status.textContent = "fetching weights (377 MB)&hellip;";
+  const base = "/model-multilingual";
+  var t0 = t();
+  const [pack, sidecar, cfg, tok, tokcfg] = await Promise.all([
+    fetch(`${base}/model.q8.mpk`).then(r => r.arrayBuffer()),
+    fetch(`${base}/model.mpk.json`).then(r => r.text()),
+    fetch(`${base}/rl_agent_config.json`).then(r => r.text()),
+    fetch(`${base}/tokenizer/tokenizer.json`).then(r => r.text()),
+    fetch(`${base}/tokenizer/tokenizer_config.json`).then(r => r.text()),
+  ]);
+  log(`fetched pack: ${(pack.byteLength / 1e6).toFixed(0)} MB in ${(t() - t0) | 0} ms (cached on reload)`);
+  status.textContent = "building weights in wasm heap&hellip;";
+  await laya_init_q8(new Uint8Array(pack), sidecar, cfg, tok, tokcfg);
+  log(`init (skeleton + record + eager dequant): ${(t() - t0).toFixed(0)} ms`);
+  status.textContent = "ready";
+
+  const questions = {
+    q0: { type: "choice",
+          instructions: "Which runtime should host the model?",
+          criteria: { burn: null, candle: null, onnxruntime: null, libtorch: null } },
+    q1: { type: "noul",
+          instructions: "The checkpoint runs natively in the browser without any server.",
+          criteria: null },
+    q2: { type: "choice",
+          instructions: "用户想做什么?",
+          criteria: { "查询天气": null, "看新闻": null, "发送邮件": null, "播放音乐": null } },
+  };
+  const state = "用户决定是否在浏览器中运行一个 421M 参数的非自回归决策模型。事实：Burn 是一个 Rust 张量框架;检查点已就绪。";
+  let t1 = t();
+  const answers = laya_decide(state, JSON.stringify(questions));
+  log(`decide (3 questions): ${(t() - t1).toFixed(0)} ms`);
+  let t2 = t();
+  const answers2 = laya_decide(state, JSON.stringify(questions));
+  log(`decide (warm): ${(t() - t2).toFixed(0)} ms`);
+  log(answers2);
+} catch (e) {
+  status.textContent = "error: " + e;
+  log(String(e));
+}
+</script>
+</body>
+</html>

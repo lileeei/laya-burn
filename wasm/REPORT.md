@@ -164,3 +164,35 @@ Gate (all exit 0):
 Still open for a real browser demo: wasm-pack/trunk packaging, async device
 init via wasm-bindgen-futures (REPORT step 3), a demo page, and the
 runtime-perf question (autotune in a browser, dequant cost on WebGPU).
+
+---
+
+## Update 2026-10-22 (evening): the browser demo RUNS
+
+`wasm/www/index.html` + `wasm-pack build --target web --release --features
+runtime` produce a working page: it fetches the 377MB multilingual Q8 pack,
+builds the agent in the wasm heap, and answers - bit-identical to the native
+server on the same inputs. Measured (WKWebView/IAB, M-series):
+
+- fetch 377MB: ~4s (cached on reload)
+- init (skeleton + record + eager dequant, 1.3GB f32): ~17s
+- decide: ~2.2s/question warm
+
+Three wasm-specific findings, for anyone following this path:
+
+1. **Device::default() is the LLVM CubeCL CPU runtime on wasm** - its JIT
+   service cannot start inside the sandbox ("Service not yet initialized -
+   call init() before load()"). The wasm-capable CPU backend is `flex`
+   (`Device::flex()`), the same backend the native default uses.
+2. **WebGPU tensors cannot be read synchronously on wasm**: into_data /
+   into_scalar panic ("try into_data_async"). Both the eager dequant (reads
+   QFloat params) and the inference tail (reads probabilities) need sync
+   reads, so the demo runs on flex. A WebGPU path needs an async-readback
+   pass through the dequant mapper and system_one - plus async device init
+   via `Device::wgpu_options().graphics_api(WebGpu).init_async().await`
+   (the sync/lazy path parks forever on wasm).
+3. wasm-bindgen(start) + `__wasm_call_ctors` + console_error_panic_hook make
+   the failure modes visible instead of parked promises.
+
+Serve with `python3 -m http.server 8765 --directory <repo root>` and open
+`/wasm/www/index.html` (the page fetches `/model-multilingual/*`).

@@ -117,10 +117,20 @@ and `laya_decide(state, questions_json)` returns /v1/decide-shaped answers.
 The `serve` feature (axum/tokio) is default-on for native builds and absent
 from wasm builds.
 
-Gate: `cargo build --manifest-path wasm/Cargo.toml --target
-wasm32-unknown-unknown --features runtime`. Remaining for a browser demo:
-wasm-pack packaging, async WebGPU device init, a demo page (see
-`wasm/REPORT.md`).
+The browser demo RUNS (`wasm/www/index.html`): fetch the 377MB multilingual
+Q8 pack, init in ~17s, decide at ~2.2s/question on the flex CPU backend -
+answers bit-identical to the native server. Build + serve:
+
+```
+cd wasm && wasm-pack build --target web --release --features runtime
+python3 -m http.server 8765 --directory ..   # from wasm/
+# open http://127.0.0.1:8765/wasm/www/index.html
+```
+
+Compute runs on `Device::flex()`: wasm cannot read GPU tensors synchronously
+(both the eager dequant and the answer readback need it), and the LLVM CPU
+runtime's JIT cannot start in the sandbox - see `wasm/REPORT.md` for the
+three wasm-specific findings and what a WebGPU path needs.
 
 ## Repository layout
 

@@ -39,6 +39,8 @@ tokenizers = { version = "0.23", default-features = false, features = ["unstable
 # tokio/mio, which do not compile for wasm32-unknown-unknown.
 laya-burn = { path = "../", default-features = false, optional = true }
 serde_json = "1"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
 
 [features]
 default = []

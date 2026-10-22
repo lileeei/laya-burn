@@ -10,3 +10,4 @@ parity/rust_flex/
 parity/ref_out/
 /model/model.mpk
 *.mpk
+wasm/pkg

@@ -75,6 +75,21 @@ mod tokenizer_probe {
 /// Device init under WebGPU is async under the hood (adapter request); a real
 /// page should await it via wasm-bindgen-futures before the first decide -
 /// see REPORT.md "Realistic path to a browser demo".
+/// Runs once at instantiation: cubecl registers kernels via inventory
+/// static constructors, which wasm-ld otherwise re-runs on every export
+/// (observed to dominate inference time - see wasm/REPORT.md).
+#[cfg(feature = "runtime")]
+#[wasm_bindgen(start)]
+pub fn start() {
+    console_error_panic_hook::set_once();
+    unsafe { __wasm_call_ctors() };
+}
+
+#[cfg(feature = "runtime")]
+unsafe extern "C" {
+    fn __wasm_call_ctors();
+}
+
 #[cfg(feature = "runtime")]
 mod laya_runtime {
     use std::cell::RefCell;
@@ -91,15 +106,24 @@ mod laya_runtime {
     /// tokenizer json bodies. `tok_cfg_json` may be "" when the checkpoint
     /// has no tokenizer_config.json. Returns the number of parameters
     /// dequantized from a quantized pack, 0 for f32.
+    /// Async so the page can render a progress state while the 1.3GB of
+    /// dequantized weights are built. Runs on the CPU backend: wasm cannot
+    /// read GPU tensors synchronously (into_data / into_scalar panic), and
+    /// both the eager dequant and the answer readback need sync reads.
+    /// WebGPU needs an async-readback pass through the mapper and the
+    /// inference tail - see wasm/REPORT.md. Resolves with "ok".
     #[wasm_bindgen]
-    pub fn laya_init_q8(
+    pub async fn laya_init_q8(
         pack: Vec<u8>,
         sidecar_json: &str,
         cfg_json: &str,
         tok_json: &str,
         tok_cfg_json: &str,
-    ) -> usize {
-        let device = Device::webgpu(Default::default());
+    ) -> Result<JsValue, JsValue> {
+        // flex: the pure-Rust CPU backend (wasm-capable). Device::default()
+        // resolves to the LLVM CubeCL CPU runtime on this target, whose JIT
+        // service cannot start inside wasm ('Service not yet initialized').
+        let device = Device::flex();
         let agent = RlAgent::load_q8_bytes(
             pack,
             sidecar_json,
@@ -109,7 +133,7 @@ mod laya_runtime {
             &device,
         );
         AGENT.with(|a| *a.borrow_mut() = Some((device, agent)));
-        0
+        Ok(JsValue::from_str("ok"))
     }
 
     /// One request: `state` string + Jev questions object (json) -> answers
