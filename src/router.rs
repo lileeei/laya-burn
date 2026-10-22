@@ -480,12 +480,30 @@ impl Router {
             && std::path::Path::new(&format!("{dir}/model.mpk.json")).is_file();
         let force_burnpack = std::env::var("LAYA_BURNPACK").as_deref() == Ok("1");
         let no_safetensors = !std::path::Path::new(&format!("{dir}/model.safetensors")).is_file();
-        if has_burnpack && (force_burnpack || no_safetensors) {
+        let mut agent = if has_burnpack && (force_burnpack || no_safetensors) {
             eprintln!("laya: loading {dir} from burnpack");
             RlAgent::load_burnpack(dir, device)
         } else {
             RlAgent::load(dir, device)
+        };
+        // LAYA_QUANT=1: Q8 MinMax weight quantization (~4x less weight memory).
+        if std::env::var("LAYA_QUANT").as_deref() == Ok("1") {
+            use burn::module::{Module, Quantizer};
+            let scheme = device
+                .settings()
+                .quantization
+                .scheme
+                .with_value(burn::tensor::quantization::QuantValue::Q8S)
+                .with_store(burn::tensor::quantization::QuantStore::Native);
+            let t0 = std::time::Instant::now();
+            let q = agent.model.clone().quantize_weights(&mut Quantizer::new(
+                burn::tensor::quantization::Calibration::MinMax,
+                scheme,
+            ));
+            agent.model = q;
+            eprintln!("laya: Q8 quantized weights in {:?}", t0.elapsed());
         }
+        agent
     }
 
     /// Route one request and run it on the chosen checkpoint. The agent for
