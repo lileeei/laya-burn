@@ -26,7 +26,7 @@ pub struct RlAgent {
 }
 
 /// One question in the public API shape.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct QuestionInput {
     pub qtype: usize, // 0=choice 1=score 2=noul
     pub instructions: String,
@@ -110,108 +110,6 @@ fn read_temperatures(
     (temperature, temperature_by_options, clamped_temperatures)
 }
 
-/// Jev request shape ({type, instructions, criteria}) -> [QuestionInput].
-/// A port of rl_common.render_options; shared by laya-serve and the wasm
-/// runtime so the option text is rendered identically everywhere.
-pub fn question_from_jev(q: &Value) -> Option<QuestionInput> {
-    let qtype = q.get("type")?.as_str()?;
-    let idx = match qtype {
-        "choice" => 0,
-        "score" => 1,
-        "noul" => 2,
-        _ => return None,
-    };
-    let instructions = match q.get("instructions") {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-        None => String::new(),
-    };
-    let criteria = q.get("criteria").cloned().unwrap_or(Value::Null);
-    let keys = match (qtype, &criteria) {
-        ("choice", Value::Object(m)) => m.keys().cloned().collect(),
-        _ => Vec::new(),
-    };
-    Some(QuestionInput { qtype: idx, instructions, options: render_options(qtype, &criteria), keys })
-}
-
-/// Criterion text must be the PLAIN string, not serde Display (which quotes
-/// it); non-strings fall back to their JSON form.
-fn render_options(qtype: &str, criteria: &Value) -> Vec<String> {
-    let text = |v: &Value| -> String {
-        match v {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        }
-    };
-    match qtype {
-        "choice" => criteria
-            .as_object()
-            .map(|m| {
-                m.iter()
-                    .map(|(label, desc)| {
-                        let blank = matches!(desc, Value::Null)
-                            || matches!(desc, Value::String(s) if s.is_empty());
-                        if blank {
-                            label.clone()
-                        } else {
-                            format!("{label}: {}", text(desc))
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-        "score" => criteria
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .enumerate()
-                    .map(|(i, d)| format!("level {i}: {}", text(d)))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        _ => vec![
-            "false: no, the statement does not hold".into(),
-            "true: yes, the statement holds".into(),
-        ],
-    }
-}
-
-/// Answer in the official response shape (what POST /v1/decide returns).
-pub fn answer_to_json(q: &QuestionInput, a: &Answer) -> Value {
-    match a {
-        Answer::Choice { index, probabilities, confidence, act_probability } => serde_json::json!({
-            "type": "choice",
-            "choice": q.keys.get(*index).or_else(|| q.options.get(*index)).cloned().unwrap_or_default(),
-            "probabilities": q.options.iter().zip(probabilities.iter())
-                .map(|(o, p)| (o.clone(), serde_json::json!(p)))
-                .collect::<serde_json::Map<String, Value>>(),
-            // p(reported answer): the column laya.evals calibration metrics
-            // read (NOT the entropy-derived `confidence` above, which moves
-            // with option count - official evals.py refuses it for exactly
-            // that reason).
-            "answer_confidence": probabilities.get(*index).copied().unwrap_or(*confidence),
-            "confidence": confidence,
-            "action": {"act_probability": act_probability},
-        }),
-        Answer::Score { score, probabilities, confidence, act_probability } => serde_json::json!({
-            "type": "score",
-            "score": score,
-            "probabilities": probabilities,
-            "answer_confidence": probabilities
-                .iter()
-                .cloned()
-                .fold(f32::MIN, f32::max),
-            "confidence": confidence,
-            "action": {"act_probability": act_probability},
-        }),
-        Answer::Noul { prob, act_probability } => serde_json::json!({
-            "type": "noul",
-            "noul": prob,
-            "answer_confidence": prob.max(1.0 - prob),
-            "action": {"act_probability": act_probability},
-        }),
-    }
-}
 
 /// Temperature for one question: the fitted per-bucket value when the map
 /// carries it, the qtype base temperature otherwise (official temp_bucket
@@ -875,7 +773,7 @@ mod tail_tests {
         let z = [0.1f32, 3.0, 1.0];
         let sharp = answer_from_logits(&z, 0.1, 0, 0.5);
         let flat = answer_from_logits(&z, 5.0, 0, 0.5);
-        let Answer::Choice { index, probabilities, confidence, act_probability } = sharp else {
+        let Answer::Choice { index, probabilities, confidence: _, act_probability } = sharp else {
             panic!("choice");
         };
         assert_eq!(index, 1);

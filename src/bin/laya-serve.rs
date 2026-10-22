@@ -80,43 +80,16 @@ async fn decide(
     State(state): State<std::sync::Arc<AppState>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let state_string = match body.get("state") {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-        None => return Err((StatusCode::BAD_REQUEST, "missing state".into())),
+    let req = match laya_burn::jev::parse_request(&body) {
+        Ok(r) => r,
+        Err(msg) => return Err((StatusCode::BAD_REQUEST, msg)),
     };
-    let questions_body = body
-        .get("questions")
-        .and_then(|q| q.as_object())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut qids: Vec<String> = questions_body.keys().cloned().collect();
-    qids.sort();
-    let questions: Vec<(String, QuestionInput)> = qids
-        .iter()
-        .filter_map(|qid| {
-            laya_burn::inference::question_from_jev(&questions_body[qid]).map(|q| (qid.clone(), q))
-        })
-        .collect();
-
-    if questions.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "no valid questions (need type in choice|score|noul)".into(),
-        ));
-    }
-    if questions.iter().any(|q| q.1.options.len() < 2) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "choice/score questions need >= 2 options in criteria".into(),
-        ));
-    }
 
     // Model inference blocks the thread for ~0.1-3 s; run it on the blocking
     // pool under the router lock to keep the async runtime healthy.
     let st = state.clone();
-    let inputs: Vec<QuestionInput> = questions.iter().map(|q| q.1.clone()).collect();
+    let inputs = req.questions.clone();
+    let state_string = req.state.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         let r = st.router.lock().unwrap();
         r.predict(&Value::String(state_string), &inputs)
@@ -126,10 +99,7 @@ async fn decide(
 
     match outcome {
         Ok((route, answers)) => {
-            let mut answer_map = serde_json::Map::new();
-            for (i, (qid, _)) in questions.iter().enumerate() {
-                answer_map.insert(qid.clone(), answer_json(&questions[i].1, &answers[i]));
-            }
+            let answer_map = laya_burn::jev::answers_json(&req.ids, &req.questions, &answers);
             Ok(Json(json!({
                 "model": route.name(),
                 "answers": Value::Object(answer_map),
@@ -181,8 +151,5 @@ async fn batch_flush_loop(
             let _ = req.reply.send(out);
         }
     }
-}
-fn answer_json(q: &QuestionInput, a: &laya_burn::inference::Answer) -> Value {
-    laya_burn::inference::answer_to_json(q, a)
 }
 

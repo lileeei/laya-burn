@@ -95,7 +95,8 @@ mod laya_runtime {
     use std::cell::RefCell;
 
     use burn::tensor::Device;
-    use laya_burn::inference::{self, RlAgent};
+    use laya_burn::inference::RlAgent;
+    use laya_burn::jev;
     use wasm_bindgen::prelude::*;
 
     thread_local! {
@@ -140,25 +141,18 @@ mod laya_runtime {
     /// object (json), same shape as POST /v1/decide.
     #[wasm_bindgen]
     pub fn laya_decide(state: &str, questions_json: &str) -> String {
-        let qs: serde_json::Value = serde_json::from_str(questions_json).expect("questions json");
-        let mut ids: Vec<String> = qs
-            .as_object()
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default();
-        ids.sort();
-        let inputs: Vec<inference::QuestionInput> = ids
-            .iter()
-            .filter_map(|id| inference::question_from_jev(&qs[id]))
-            .collect();
+        let body: serde_json::Value =
+            serde_json::from_str(&format!(r#"{{"state": {{}}, "questions": {questions_json}}}"#))
+                .expect("questions json");
+        // The same parse/validate/label path as laya-serve (the wasm copy
+        // previously skipped the >=2-option validation).
+        let req = jev::parse_request(&body).expect("valid questions");
         AGENT.with(|cell| {
             let mut guard = cell.borrow_mut();
             let (device, agent) = guard.as_mut().expect("call laya_init_q8 first");
             let state = serde_json::Value::String(state.to_string());
-            let answers = agent.system_one(device, &state, &inputs, None);
-            let mut map = serde_json::Map::new();
-            for ((id, q), a) in ids.iter().zip(inputs.iter()).zip(answers.iter()) {
-                map.insert(id.clone(), inference::answer_to_json(q, a));
-            }
+            let answers = agent.system_one(device, &state, &req.questions, None);
+            let map = jev::answers_json(&req.ids, &req.questions, &answers);
             serde_json::to_string(&serde_json::Value::Object(map)).expect("answers json")
         })
     }
