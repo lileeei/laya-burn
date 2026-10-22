@@ -1,0 +1,409 @@
+{
+ "_meta": {
+  "english_only_macro": 0.2247,
+  "languages_gaining_ge_0.10": 27,
+  "largest_gains": {
+   "ar": 0.33,
+   "he": 0.33,
+   "hi": 0.38,
+   "ko": 0.35,
+   "th": 0.37,
+   "ur": 0.31
+  },
+  "losses_gt_0.02": {
+   "am": -0.03,
+   "es": -0.04,
+   "fr": -0.07,
+   "pt": -0.04
+  },
+  "macro_accuracy": 0.3402,
+  "method": "AUTO routing per request (Router decides english vs multilingual), 100 cases/lang, seed 13, 20 options - same protocol as sweep51_results.json",
+  "note": "fr/es/pt lose slightly: the diacritic-rate router sends part of them to multilingual where the english checkpoint scored better; every non-Latin-script language gains.",
+  "official_english_macro": 0.2269
+ },
+ "af": {
+  "accuracy": 0.31,
+  "n": 100,
+  "routes": {
+   "english": 94,
+   "multilingual": 6
+  }
+ },
+ "am": {
+  "accuracy": 0.13,
+  "n": 100,
+  "routes": {
+   "english": 1,
+   "multilingual": 99
+  }
+ },
+ "ar": {
+  "accuracy": 0.46,
+  "n": 100,
+  "routes": {
+   "english": 1,
+   "multilingual": 99
+  }
+ },
+ "az": {
+  "accuracy": 0.3,
+  "n": 100,
+  "routes": {
+   "english": 2,
+   "multilingual": 98
+  }
+ },
+ "bn": {
+  "accuracy": 0.31,
+  "n": 100,
+  "routes": {
+   "english": 1,
+   "multilingual": 99
+  }
+ },
+ "cy": {
+  "accuracy": 0.09,
+  "n": 100,
+  "routes": {
+   "english": 91,
+   "multilingual": 9
+  }
+ },
+ "da": {
+  "accuracy": 0.46,
+  "n": 100,
+  "routes": {
+   "english": 61,
+   "multilingual": 39
+  }
+ },
+ "de": {
+  "accuracy": 0.46,
+  "n": 100,
+  "routes": {
+   "english": 53,
+   "multilingual": 47
+  }
+ },
+ "el": {
+  "accuracy": 0.36,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "en": {
+  "accuracy": 0.79,
+  "n": 100,
+  "routes": {
+   "english": 100
+  }
+ },
+ "es": {
+  "accuracy": 0.47,
+  "n": 100,
+  "routes": {
+   "english": 61,
+   "multilingual": 39
+  }
+ },
+ "fa": {
+  "accuracy": 0.42,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "fi": {
+  "accuracy": 0.27,
+  "n": 100,
+  "routes": {
+   "english": 42,
+   "multilingual": 58
+  }
+ },
+ "fr": {
+  "accuracy": 0.58,
+  "n": 100,
+  "routes": {
+   "english": 54,
+   "multilingual": 46
+  }
+ },
+ "he": {
+  "accuracy": 0.37,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "hi": {
+  "accuracy": 0.48,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "hu": {
+  "accuracy": 0.32,
+  "n": 100,
+  "routes": {
+   "english": 16,
+   "multilingual": 84
+  }
+ },
+ "hy": {
+  "accuracy": 0.15,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "id": {
+  "accuracy": 0.32,
+  "n": 100,
+  "routes": {
+   "english": 100
+  }
+ },
+ "is": {
+  "accuracy": 0.25,
+  "n": 100,
+  "routes": {
+   "english": 20,
+   "multilingual": 80
+  }
+ },
+ "it": {
+  "accuracy": 0.35,
+  "n": 100,
+  "routes": {
+   "english": 71,
+   "multilingual": 29
+  }
+ },
+ "ja": {
+  "accuracy": 0.64,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "jv": {
+  "accuracy": 0.14,
+  "n": 100,
+  "routes": {
+   "english": 99,
+   "multilingual": 1
+  }
+ },
+ "ka": {
+  "accuracy": 0.1,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "km": {
+  "accuracy": 0.2,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "kn": {
+  "accuracy": 0.17,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "ko": {
+  "accuracy": 0.45,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "lv": {
+  "accuracy": 0.29,
+  "n": 100,
+  "routes": {
+   "english": 8,
+   "multilingual": 92
+  }
+ },
+ "ml": {
+  "accuracy": 0.22,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "mn": {
+  "accuracy": 0.09,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "ms": {
+  "accuracy": 0.27,
+  "n": 100,
+  "routes": {
+   "english": 100
+  }
+ },
+ "my": {
+  "accuracy": 0.13,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "nb": {
+  "accuracy": 0.37,
+  "n": 100,
+  "routes": {
+   "english": 62,
+   "multilingual": 38
+  }
+ },
+ "nl": {
+  "accuracy": 0.44,
+  "n": 100,
+  "routes": {
+   "english": 86,
+   "multilingual": 14
+  }
+ },
+ "pl": {
+  "accuracy": 0.44,
+  "n": 100,
+  "routes": {
+   "english": 23,
+   "multilingual": 77
+  }
+ },
+ "pt": {
+  "accuracy": 0.44,
+  "n": 100,
+  "routes": {
+   "english": 48,
+   "multilingual": 52
+  }
+ },
+ "ro": {
+  "accuracy": 0.29,
+  "n": 100,
+  "routes": {
+   "english": 56,
+   "multilingual": 44
+  }
+ },
+ "ru": {
+  "accuracy": 0.56,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "sl": {
+  "accuracy": 0.26,
+  "n": 100,
+  "routes": {
+   "english": 49,
+   "multilingual": 51
+  }
+ },
+ "sq": {
+  "accuracy": 0.24,
+  "n": 100,
+  "routes": {
+   "english": 11,
+   "multilingual": 89
+  }
+ },
+ "sv": {
+  "accuracy": 0.45,
+  "n": 100,
+  "routes": {
+   "english": 23,
+   "multilingual": 77
+  }
+ },
+ "sw": {
+  "accuracy": 0.1,
+  "n": 100,
+  "routes": {
+   "english": 100
+  }
+ },
+ "ta": {
+  "accuracy": 0.23,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "te": {
+  "accuracy": 0.19,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "th": {
+  "accuracy": 0.48,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "tl": {
+  "accuracy": 0.29,
+  "n": 100,
+  "routes": {
+   "english": 100
+  }
+ },
+ "tr": {
+  "accuracy": 0.38,
+  "n": 100,
+  "routes": {
+   "english": 9,
+   "multilingual": 91
+  }
+ },
+ "ur": {
+  "accuracy": 0.41,
+  "n": 100,
+  "routes": {
+   "multilingual": 100
+  }
+ },
+ "vi": {
+  "accuracy": 0.27,
+  "n": 100,
+  "routes": {
+   "english": 8,
+   "multilingual": 92
+  }
+ },
+ "zh-CN": {
+  "accuracy": 0.62,
+  "n": 100,
+  "routes": {
+   "english": 5,
+   "multilingual": 95
+  }
+ },
+ "zh-TW": {
+  "accuracy": 0.54,
+  "n": 100,
+  "routes": {
+   "english": 4,
+   "multilingual": 96
+  }
+ }
+}

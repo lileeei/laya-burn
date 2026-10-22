@@ -86,8 +86,17 @@ python3 evals/sweep51.py ...                                    # 51-language sw
 python3 evals/bench_latency.py http://127.0.0.1:8090            # p50/p95 latency
 ```
 
-Committed results: `evals/sweep51_results.json` (macro 0.2247 vs official 0.2269,
-english checkpoint on all languages), `evals/latency_baseline.json`.
+Committed results:
+
+- `evals/sweep51_results.json` — english checkpoint forced on all 51
+  languages: macro 0.2247 vs official 0.2269.
+- `evals/sweep51_routed_results.json` — AUTO routing (english for Latin,
+  mmBERT for non-Latin): **macro 0.3402**, +0.115 over english-only. 27
+  languages gain >= 0.10 (hi +0.38, th +0.37, ko +0.35, ar +0.33); only
+  fr/es/pt lose slightly (diacritic routing sends part of them to
+  multilingual). The official repo has no multilingual-model sweep to
+  compare against - these numbers are laya-burn's own contribution.
+- `evals/latency_baseline.json` — serving latency + accuracy baselines.
 
 ## Environment knobs
 
