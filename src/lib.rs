@@ -5,6 +5,7 @@ pub mod calibration;
 pub mod export;
 pub mod inference;
 pub mod model;
+pub mod options;
 pub mod python_json;
 pub mod quant;
 pub mod router;

@@ -17,6 +17,8 @@ pub struct RlAgent {
     pub tok: LayaTokenizer,
     pub max_len: usize,
     pub head_max_len: usize,
+    /// Parity dump dir, resolved once at load (old LAYA_DUMP_DIR).
+    pub dump_dir: Option<String>,
     pub temperature: [f64; 3],
     pub temperature_by_options: Vec<(String, f64)>,
     /// Buckets whose fitted temperature was clamped to [0.5, 5.0] at load.
@@ -82,9 +84,12 @@ fn confidence_from_probs(p: &[f32]) -> f32 {
 /// LAYA_UNCLAMPED=1 keeps the RAW fitted temperatures - what the official
 /// harness uses to reproduce its committed sweep numbers (--unclamped), as
 /// opposed to the clamped readout the SDK applies.
-fn read_temperatures(cfg: &Value) -> ([f64; 3], Vec<(String, f64)>, Vec<String>) {
+fn read_temperatures(
+    cfg: &Value,
+    unclamped: bool,
+) -> ([f64; 3], Vec<(String, f64)>, Vec<String>) {
     let maybe_clamp = |raw: f64| {
-        if std::env::var("LAYA_UNCLAMPED").as_deref() == Ok("1") {
+        if unclamped {
             raw
         } else {
             crate::calibration::Calibration::clamp_temperature(raw)
@@ -273,6 +278,15 @@ pub(crate) fn answer_from_logits(z: &[f32], temp: f64, qtype: usize, act_probabi
 
 impl RlAgent {
     pub fn load(model_dir: &str, device: &Device) -> Self {
+        Self::load_with(model_dir, &crate::options::LoadOptions::from_env(), device)
+    }
+
+    /// Env-free variant of [RlAgent::load] for embedders and tests.
+    pub fn load_with(
+        model_dir: &str,
+        opts: &crate::options::LoadOptions,
+        device: &Device,
+    ) -> Self {
         let weights =
             std::fs::read(format!("{model_dir}/model.safetensors")).expect("read safetensors");
         let cfg_json =
@@ -280,7 +294,10 @@ impl RlAgent {
         let tok_json =
             std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer.json")).unwrap();
         let tok_cfg = std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer_config.json")).ok();
-        Self::load_bytes(weights, &cfg_json, &tok_json, tok_cfg.as_deref(), device)
+        let mut agent =
+            Self::load_bytes_with(weights, &cfg_json, &tok_json, tok_cfg.as_deref(), opts, device);
+        agent.dump_dir = opts.dump_dir.clone();
+        agent
     }
 
     /// No-filesystem variant of [RlAgent::load] for embedders that fetch
@@ -293,20 +310,36 @@ impl RlAgent {
         tok_cfg_json: Option<&str>,
         device: &Device,
     ) -> Self {
+        Self::load_bytes_with(
+            weights,
+            cfg_json,
+            tok_json,
+            tok_cfg_json,
+            &crate::options::LoadOptions::from_env(),
+            device,
+        )
+    }
+
+    /// Env-free [RlAgent::load_bytes].
+    pub fn load_bytes_with(
+        weights: Vec<u8>,
+        cfg_json: &str,
+        tok_json: &str,
+        tok_cfg_json: Option<&str>,
+        opts: &crate::options::LoadOptions,
+        device: &Device,
+    ) -> Self {
         let w = Weights::from_bytes(weights);
         let cfg: Value = serde_json::from_str(cfg_json).unwrap();
         let head_layers = cfg["head_layers"].as_u64().unwrap_or(2) as usize;
         let mut spec = crate::skeleton::SkeletonSpec::from_weights(&w, head_layers);
         // NB: every shipped checkpoint was trained with sliding theta 10000,
         // whatever its encoder config's rope_parameters says (verified by
-        // parity). LAYA_THETA_SLIDE overrides for experiments.
-        spec.sliding_theta = std::env::var("LAYA_THETA_SLIDE")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(10_000.0);
+        // parity). opts.theta_sliding overrides for experiments.
+        spec.sliding_theta = opts.theta_sliding.unwrap_or(10_000.0);
         let ecfg = spec.encoder_config();
         let model = Laya::load(&w, &ecfg, head_layers, device);
-        Self::finish(model, &ecfg, cfg_json, tok_json, tok_cfg_json, device)
+        Self::finish(model, &ecfg, cfg_json, tok_json, tok_cfg_json, opts, device)
     }
 
     /// Shared constructor tail: ropes, agent config, temperatures, tokenizer.
@@ -317,15 +350,17 @@ impl RlAgent {
         cfg_json: &str,
         tok_json: &str,
         tok_cfg_json: Option<&str>,
+        opts: &crate::options::LoadOptions,
         device: &Device,
     ) -> Self {
         let cfg: Value = serde_json::from_str(cfg_json).unwrap();
-        let (temperature, temperature_by_options, clamped_temperatures) = read_temperatures(&cfg);
+        let (temperature, temperature_by_options, clamped_temperatures) =
+            read_temperatures(&cfg, opts.unclamped);
         let ropes = Ropes::new(ecfg, device);
         let tok = LayaTokenizer::from_json(tok_json, tok_cfg_json);
         let max_len = cfg["max_len"].as_u64().unwrap() as usize;
         let head_max_len = cfg["head_max_len"].as_u64().unwrap() as usize;
-        Self { model, ropes, tok, max_len, head_max_len, temperature, temperature_by_options, clamped_temperatures }
+        Self { model, ropes, tok, max_len, head_max_len, dump_dir: opts.dump_dir.clone(), temperature, temperature_by_options, clamped_temperatures }
     }
 
     /// Load from a burnpack export (model.mpk + model.mpk.json sidecar) with
@@ -374,6 +409,27 @@ impl RlAgent {
         tok_cfg_json: Option<&str>,
         device: &Device,
     ) -> Self {
+        Self::load_q8_bytes_with(
+            pack,
+            sidecar_json,
+            cfg_json,
+            tok_json,
+            tok_cfg_json,
+            &crate::options::LoadOptions::from_env(),
+            device,
+        )
+    }
+
+    /// Env-free [RlAgent::load_q8_bytes].
+    pub fn load_q8_bytes_with(
+        pack: Vec<u8>,
+        sidecar_json: &str,
+        cfg_json: &str,
+        tok_json: &str,
+        tok_cfg_json: Option<&str>,
+        opts: &crate::options::LoadOptions,
+        device: &Device,
+    ) -> Self {
         use crate::skeleton::{SkeletonSpec, SkeletonWeights};
         use burn::module::Module;
 
@@ -391,7 +447,7 @@ impl RlAgent {
             eprintln!("laya: dequantized {}/{} params from pack", ds.quantized, ds.params);
         }
         let model = crate::quant::cast_compute_dtype(model);
-        Self::finish(model, &ecfg, cfg_json, tok_json, tok_cfg_json, device)
+        Self::finish(model, &ecfg, cfg_json, tok_json, tok_cfg_json, opts, device)
     }
 
     /// Create the opt-in graph capture/replay engine (LAYA_REPLAY=1).
@@ -466,7 +522,7 @@ impl RlAgent {
         let b = collate(&seqs, self.tok.pad_token_id, batch_len, n_markers);
         let Batch { input_ids: b_input_ids, attention_mask: b_attention_mask, marker_pos: b_marker_pos, marker_mask: b_marker_mask, qtype: b_qtype } = b;
 
-        if let Ok(dir) = std::env::var("LAYA_DUMP_DIR") {
+        if let Some(dir) = &self.dump_dir {
             let _ = std::fs::create_dir_all(&dir);
             let rows: Vec<String> = b_input_ids
                 .iter()

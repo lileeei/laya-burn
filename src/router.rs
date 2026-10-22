@@ -401,6 +401,9 @@ pub struct Router {
     typed: RefCell<Option<RlAgent>>,
     multilingual: RefCell<Option<RlAgent>>,
     forced: Option<Route>,
+    /// Load-time knobs resolved at the binary edge (pack choice, quant at
+    /// load, ...); Router::load consults these instead of the environment.
+    options: crate::options::LoadOptions,
 }
 
 impl Router {
@@ -432,6 +435,7 @@ impl Router {
             english: RefCell::new(None),
             typed: RefCell::new(None),
             multilingual: RefCell::new(None),
+            options: crate::options::LoadOptions::from_env(),
             forced,
         }
     }
@@ -470,40 +474,42 @@ impl Router {
         }
     }
 
-    fn load(dir: &str, device: &Device) -> RlAgent {
-        // Burnpack selection: LAYA_BURNPACK=q8 forces the Q8 export, "1" the
-        // f32 one; with no setting a present model.q8.mpk wins (smaller file,
-        // same answers, eager-dequantized at load), then model.mpk, then
-        // safetensors. A pack is also used when safetensors is absent.
+    fn load(&self, dir: &str, device: &Device) -> RlAgent {
+        // Pack selection driven by the router's LoadOptions (resolved at the
+        // binary edge): the Q8 export wins when present (smaller file, same
+        // answers, eager-dequantized at load), then the f32 pack, then
+        // safetensors; a pack is also used when safetensors is absent.
+        use crate::options::PackChoice;
         let sidecar = std::path::Path::new(&format!("{dir}/model.mpk.json")).is_file();
         let q8_pack = sidecar && std::path::Path::new(&format!("{dir}/model.q8.mpk")).is_file();
         let f32_pack = sidecar && std::path::Path::new(&format!("{dir}/model.mpk")).is_file();
         let no_safetensors = !std::path::Path::new(&format!("{dir}/model.safetensors")).is_file();
-        let mut agent = match std::env::var("LAYA_BURNPACK").as_deref() {
-            Ok("q8") => {
-                assert!(q8_pack, "LAYA_BURNPACK=q8 but {dir}/model.q8.mpk (+ sidecar) not found");
+        let effective = match self.options.pack {
+            PackChoice::Q8Pack => {
+                assert!(q8_pack, "pack=Q8 but {dir}/model.q8.mpk (+ sidecar) not found");
+                PackChoice::Q8Pack
+            }
+            PackChoice::F32Pack => {
+                assert!(f32_pack, "pack=F32 but {dir}/model.mpk (+ sidecar) not found");
+                PackChoice::F32Pack
+            }
+            // Auto: q8 when present; f32 pack only when safetensors absent.
+            PackChoice::Auto if q8_pack => PackChoice::Q8Pack,
+            PackChoice::Auto if f32_pack && no_safetensors => PackChoice::F32Pack,
+            other => other,
+        };
+        let mut agent = match effective {
+            PackChoice::Q8Pack => {
                 eprintln!("laya: loading {dir} from burnpack model.q8.mpk");
                 RlAgent::load_burnpack_named(dir, "model.q8.mpk", device)
             }
-            pack @ (Ok("1") | Ok("f32")) => {
-                assert!(f32_pack, "LAYA_BURNPACK=1/f32 but {dir}/model.mpk (+ sidecar) not found");
+            PackChoice::F32Pack => {
                 eprintln!("laya: loading {dir} from burnpack");
                 RlAgent::load_burnpack(dir, device)
             }
-            _ if q8_pack || (f32_pack && no_safetensors) => {
-                if q8_pack {
-                    eprintln!("laya: loading {dir} from burnpack model.q8.mpk");
-                    RlAgent::load_burnpack_named(dir, "model.q8.mpk", device)
-                } else {
-                    eprintln!("laya: loading {dir} from burnpack");
-                    RlAgent::load_burnpack(dir, device)
-                }
-            }
-            _ => RlAgent::load(dir, device),
+            PackChoice::Safetensors | PackChoice::Auto => RlAgent::load(dir, device),
         };
-        // LAYA_QUANT=1: quantize at load (no exported pack needed). Same
-        // exempted group as the exported model.q8.mpk.
-        if std::env::var("LAYA_QUANT").as_deref() == Ok("1") {
+        if self.options.quant_at_load {
             let t0 = std::time::Instant::now();
             agent.model = crate::quant::quantize(agent.model.clone(), device);
             eprintln!("laya: Q8 quantized weights in {:?}", t0.elapsed());
@@ -537,7 +543,7 @@ impl Router {
                 ))
             })?;
             eprintln!("laya: loading {} checkpoint from {dir} ...", route.name());
-            *cell.borrow_mut() = Some(Self::load(&dir, &self.device));
+            *cell.borrow_mut() = Some(self.load(&dir, &self.device));
         }
         let guard = cell.borrow();
         let agent = guard.as_ref().unwrap();
@@ -594,7 +600,7 @@ impl Router {
                         ))
                     })?;
                     eprintln!("laya: loading {} checkpoint from {dir} ...", route.name());
-                    let loaded = Self::load(&dir, &self.device);
+                    let loaded = self.load(&dir, &self.device);
                     let _ = RefCell::new(()); // keep RefCell import used on all cfgs
                     *cell.borrow_mut() = Some(loaded);
                 }

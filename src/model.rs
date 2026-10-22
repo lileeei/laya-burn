@@ -616,6 +616,10 @@ impl Laya {
         let mut h = self.emb_norm.forward(self.tok_embeddings.forward(input_ids.clone()));
         dump_tensor("emb_out", &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
         dump_ids("input_ids", &input_ids.clone().slice([0..1, 0..seq]));
+        // Env knobs resolved ONCE per forward (they used to be read inside the
+        // layer loop - which also placed them inside captured replay closures).
+        let interleaved = std::env::var("LAYA_ROPE").as_deref() == Ok("interleaved");
+        let attn_mode: String = std::env::var("LAYA_ATTN").unwrap_or_default();
         for (li, layer) in self.layers.iter().enumerate() {
             let _ = li;
             let x1 = match &layer.attn_norm {
@@ -624,7 +628,6 @@ impl Laya {
             };
             let (q, k, v) = split_qkv(layer.wqkv.forward(x1), d, n_heads);
             let rope = if layer.is_global { &ropes.full } else { &ropes.sliding };
-            let interleaved = std::env::var("LAYA_ROPE").as_deref() == Ok("interleaved");
             let (q, k) = if interleaved {
                 (rope.forward_interleaved(q), rope.forward_interleaved(k))
             } else {
@@ -646,7 +649,7 @@ impl Laya {
             } else {
                 AttnMask::Bool(pad_bool.clone())
             };
-            let attn_mode = std::env::var("LAYA_ATTN").unwrap_or_default();
+            let attn_mode = &attn_mode;
             let use_blocks = attn_mode == "blocks" && !layer.is_global;
             let use_kernel = attn_mode == "kernel"
                 && !layer.is_global
