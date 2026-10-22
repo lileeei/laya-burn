@@ -227,6 +227,50 @@ pub fn answer_to_json(q: &QuestionInput, a: &Answer) -> Value {
     }
 }
 
+/// Temperature for one question: the fitted per-bucket value when the map
+/// carries it, the qtype base temperature otherwise (official temp_bucket
+/// semantics). Pure so the bucket/fallback rule is table-testable.
+pub(crate) fn temperature_for(
+    temperature: &[f64; 3],
+    temperature_by_options: &[(String, f64)],
+    qtype: usize,
+    k: usize,
+) -> f64 {
+    let bucket = Calibration::temp_bucket(qtype, k);
+    temperature_by_options
+        .iter()
+        .find(|(key, _)| *key == bucket)
+        .map(|&(_, t)| t)
+        .unwrap_or(temperature[qtype])
+}
+
+/// The decision tail: one question's logits + its temperature -> its Answer.
+/// Pure math over (z, temp, qtype, act_probability); this is the test
+/// surface for everything the evals measure (bucket resolution, temperature
+/// sharpening, round4, answer_confidence, expected score).
+pub(crate) fn answer_from_logits(z: &[f32], temp: f64, qtype: usize, act_probability: f32) -> Answer {
+    let k = z.len();
+    let p = Calibration::probabilities(z, k, temp);
+    match qtype {
+        0 => Answer::Choice {
+            index: Calibration::arg_max(&p),
+            probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
+            confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
+            act_probability,
+        },
+        1 => Answer::Score {
+            score: Calibration::round4(Calibration::expected_score(&p)) as f32,
+            probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
+            confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
+            act_probability,
+        },
+        _ => Answer::Noul {
+            prob: Calibration::round4(p[1]) as f32,
+            act_probability,
+        },
+    }
+}
+
 impl RlAgent {
     pub fn load(model_dir: &str, device: &Device) -> Self {
         let weights =
@@ -411,95 +455,10 @@ impl RlAgent {
         replay: Option<&mut ReplayEngine<'_>>,
     ) -> Vec<Answer> {
         let state_str = PythonJson::state(state);
-
-        let mut seqs = Vec::new();
-        for q in questions {
-            let (ids, markers) = build_sequence(
-                &self.tok,
-                &state_str,
-                &Question { qtype: q.qtype, instructions: q.instructions.clone(), options: q.options.clone() },
-                self.max_len,
-                self.head_max_len,
-            );
-            seqs.push((ids, markers, q.qtype as i64));
-        }
-
-        let batch_len: usize = seqs.iter().map(|(ids, _, _)| ids.len()).max().unwrap();
-        let n_markers: usize = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
-        let b = collate(&seqs, self.tok.pad_token_id, batch_len, n_markers);
-        let Batch { input_ids: b_input_ids, attention_mask: b_attention_mask, marker_pos: b_marker_pos, marker_mask: b_marker_mask, qtype: b_qtype } = b;
-
-        if let Ok(dir) = std::env::var("LAYA_DUMP_DIR") {
-            let _ = std::fs::create_dir_all(&dir);
-            let rows: Vec<String> = b_input_ids
-                .iter()
-                .map(|r| r.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
-                .collect();
-            let _ = std::fs::write(format!("{dir}/all_rows.txt"), rows.join("
-"));
-        }
-        // LAYA_REPLAY=1 routes the forward through the per-shape graph
-        // cache; when unset (replay == None) the direct path below runs
-        // exactly as before.
-        let key: ShapeKey = (seqs.len(), batch_len, n_markers);
-        let (logits, act_logits) = match replay {
-            None => self.model.forward(
-                t2i(b_input_ids, batch_len, device),
-                t2i(b_attention_mask, batch_len, device),
-                t2i(b_marker_pos, n_markers, device),
-                t2i(b_marker_mask, n_markers, device),
-                t1i(b_qtype, device),
-                &self.ropes,
-            ),
-            Some(engine) => engine.run(key, || StableInputs {
-                input_ids: t2i(b_input_ids, batch_len, device),
-                attention_mask: t2i(b_attention_mask, batch_len, device),
-                marker_pos: t2i(b_marker_pos, n_markers, device),
-                marker_mask: t2i(b_marker_mask, n_markers, device),
-                qtype: t1i(b_qtype, device),
-            }),
-        };
-
-        let logits = logits.to_data().as_slice::<f32>().unwrap().to_vec();
-        let act_row = act_logits.to_data().as_slice::<f32>().unwrap().to_vec();
-        let act = Calibration::softmax(&act_row[..2]);
-
-        let mut answers = Vec::new();
-        for (r, q) in questions.iter().enumerate() {
-            let k = seqs[r].1.len();
-            let bucket = Calibration::temp_bucket(q.qtype, k);
-            let temp = self
-                .temperature_by_options
-                .iter()
-                .find(|(key, _)| *key == bucket)
-                .map(|&(_, t)| t)
-                .unwrap_or(self.temperature[q.qtype]);
-            let z: Vec<f32> = (0..k).map(|c| logits[r * n_markers + c]).collect();
-            let p = Calibration::probabilities(&z, k, temp);
-            let act_probability = Calibration::round4(act[0]) as f32;
-                let answer = match q.qtype {
-                0 => Answer::Choice {
-                    index: Calibration::arg_max(&p),
-                    probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
-                    confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
-                    act_probability,
-                },
-                1 => Answer::Score {
-                    score: Calibration::round4(Calibration::expected_score(&p)) as f32,
-                    probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
-                    confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
-                    act_probability,
-                },
-                _ => Answer::Noul {
-                    prob: Calibration::round4(p[1]) as f32,
-                    act_probability,
-                },
-            };
-            answers.push(answer);
-        }
-        answers
+        let rows: Vec<(String, &QuestionInput)> =
+            questions.iter().map(|q| (state_str.clone(), q)).collect();
+        self.run_rows(device, &rows, replay)
     }
-
 
     /// Batched variant for the server: each item carries its OWN state and
     /// questions; all rows are collated into ONE forward pass. Returns one
@@ -583,41 +542,20 @@ impl RlAgent {
         };
 
         let logits = logits.to_data().as_slice::<f32>().unwrap().to_vec();
-        let act_row = act_logits.to_data().as_slice::<f32>().unwrap().to_vec();
-        let act = Calibration::softmax(&act_row[..2]);
+        let act_rows = act_logits.to_data().as_slice::<f32>().unwrap().to_vec();
 
         let mut answers = Vec::new();
         for (r, (_, q)) in rows.iter().enumerate() {
             let k = seqs[r].1.len();
-            let bucket = Calibration::temp_bucket(q.qtype, k);
-            let temp = self
-                .temperature_by_options
-                .iter()
-                .find(|(key, _)| *key == bucket)
-                .map(|&(_, t)| t)
-                .unwrap_or(self.temperature[q.qtype]);
+            let temp = temperature_for(&self.temperature, &self.temperature_by_options, q.qtype, k);
+            // The act head is per-row: row r's act_probability comes from
+            // act_rows[2r..2r+2], NOT row 0's (the old copy used row 0 for
+            // every row - invisible while act saturates at 1.0).
+            let act_probability = Calibration::round4(
+                Calibration::softmax(&act_rows[2 * r..2 * r + 2])[0],
+            ) as f32;
             let z: Vec<f32> = (0..k).map(|c| logits[r * n_markers + c]).collect();
-            let p = Calibration::probabilities(&z, k, temp);
-            let act_probability = Calibration::round4(act[0]) as f32;
-                let answer = match q.qtype {
-                0 => Answer::Choice {
-                    index: Calibration::arg_max(&p),
-                    probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
-                    confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
-                    act_probability,
-                },
-                1 => Answer::Score {
-                    score: Calibration::round4(Calibration::expected_score(&p)) as f32,
-                    probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
-                    confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
-                    act_probability,
-                },
-                _ => Answer::Noul {
-                    prob: Calibration::round4(p[1]) as f32,
-                    act_probability,
-                },
-            };
-            answers.push(answer);
+            answers.push(answer_from_logits(&z, temp, q.qtype, act_probability));
         }
 
         answers
@@ -912,4 +850,86 @@ fn collate(seqs: &[(Vec<i64>, Vec<usize>, i64)], pad: i64, batch_len: usize, n_m
         qtype.push(*qt);
     }
     Batch { input_ids, attention_mask, marker_pos, marker_mask, qtype }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+
+    /// Bucket resolution: fitted map wins inside its bucket, base
+    /// temperature outside it.
+    #[test]
+    fn temperature_bucket_hit_and_fallback() {
+        let by_options = vec![
+            ("choice:11+".to_string(), 0.5),
+            ("noul:2".to_string(), 2.0),
+        ];
+        let base = [1.6, 1.25, 1.98];
+        // 20 options -> "choice:11+" bucket: fitted 0.5, not base 1.6
+        assert_eq!(temperature_for(&base, &by_options, 0, 20), 0.5);
+        // 4 options -> "choice:2"? no: "choice:3-5" is not fitted -> base
+        assert_eq!(temperature_for(&base, &by_options, 0, 4), 1.6);
+        // noul always k=2 -> fitted 2.0
+        assert_eq!(temperature_for(&base, &by_options, 2, 2), 2.0);
+        // score never fitted here -> base
+        assert_eq!(temperature_for(&base, &by_options, 1, 5), 1.25);
+    }
+
+    /// Temperature sharpening: lower temperature -> sharper distribution,
+    /// argmax stable, probabilities renormalized to ~1.
+    #[test]
+    fn answer_choice_temperature_semantics() {
+        let z = [0.1f32, 3.0, 1.0];
+        let sharp = answer_from_logits(&z, 0.1, 0, 0.5);
+        let flat = answer_from_logits(&z, 5.0, 0, 0.5);
+        let Answer::Choice { index, probabilities, confidence, act_probability } = sharp else {
+            panic!("choice");
+        };
+        assert_eq!(index, 1);
+        assert_eq!(act_probability, 0.5);
+        let sum: f32 = probabilities.iter().sum();
+        assert!((sum - 1.0).abs() < 2e-3, "sum {sum}");
+        assert!(probabilities[1] > 0.9, "sharp temp must concentrate: {probabilities:?}");
+        let Answer::Choice { probabilities: pf, .. } = flat else { panic!() };
+        assert!(pf[1] < probabilities[1], "flat temp must spread");
+    }
+
+    /// Noul reports p[1] (the "true" arm), not the argmax.
+    #[test]
+    fn answer_noul_reports_true_arm() {
+        let z = [2.0f32, -1.0]; // false-leaning
+        let Answer::Noul { prob, act_probability } = answer_from_logits(&z, 1.0, 2, 0.9) else {
+            panic!("noul");
+        };
+        assert!(prob < 0.5);
+        assert_eq!(act_probability, 0.9);
+        let z = [-1.0f32, 2.0];
+        let Answer::Noul { prob, .. } = answer_from_logits(&z, 1.0, 2, 0.9) else { panic!() };
+        assert!(prob > 0.5);
+    }
+
+    /// Score answer: expected value sum(i * p_i), rounded to 4 decimals.
+    #[test]
+    fn answer_score_expected_value() {
+        let z = [0.0f32; 5]; // uniform over 5 levels -> expected 2.0
+        let Answer::Score { score, probabilities, .. } = answer_from_logits(&z, 1.0, 1, 1.0)
+        else {
+            panic!("score");
+        };
+        assert!((score - 2.0).abs() < 0.01, "score {score}");
+        assert!((probabilities.iter().sum::<f32>() - 1.0).abs() < 2e-3);
+    }
+
+    /// round4 surface: every published probability is 4-decimal rounded.
+    #[test]
+    fn answer_probabilities_are_rounded_to_4dp() {
+        let z = [0.37f32, -1.42, 2.05];
+        let Answer::Choice { probabilities, .. } = answer_from_logits(&z, 1.3, 0, 1.0) else {
+            panic!()
+        };
+        for p in probabilities {
+            let scaled = p as f64 * 1e4;
+            assert!((scaled - scaled.round()).abs() < 2e-3, "{p} not 4dp"); // f32 ulp slack
+        }
+    }
 }
