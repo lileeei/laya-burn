@@ -5,8 +5,9 @@
 //! Checkpoints of the official SDK:
 //!   english          ModernBERT-large, 512 tokens  (implemented here)
 //!   typed-decisions  ModernBERT-large, 1024 tokens (implemented here)
-//!   multilingual     mmBERT-base, 1024 tokens      (STUB: different encoder
-//!                    architecture that src/model.rs does not implement)
+//!   multilingual     mmBERT-base, 1024 tokens      (implemented here: same
+//!                    ModernBERT shape at base scale, F16 safetensors,
+//!                    parity-verified against the PyTorch reference)
 //!
 //! Detection fidelity vs the official laya/lang.py:
 //! - The script-range table and script counting are an exact port
@@ -39,8 +40,8 @@ use serde_json::Value;
 pub enum Route {
     English,
     TypedDecisions,
-    /// Not implemented: the mmBERT-base encoder. Predicting on this route
-    /// returns [RouterError::MultilingualUnimplemented].
+    /// mmBERT-base (ModernBERT-base shape: hidden 768, 22 layers, 256k vocab,
+    /// sans_pos embeddings - no positional weight exists, RoPE only).
     Multilingual,
 }
 
@@ -58,10 +59,6 @@ impl Route {
 #[derive(Debug)]
 #[derive(Clone)]
 pub enum RouterError {
-    /// The request needs the mmBERT-base multilingual checkpoint, which this
-    /// crate does not implement (only the ModernBERT-large pipeline in
-    /// src/model.rs exists). The message is suitable for display.
-    MultilingualUnimplemented(String),
     /// A checkpoint directory the router wanted is missing or unreadable.
     Load(String),
 }

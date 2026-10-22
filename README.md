@@ -24,7 +24,9 @@ With no CLI argument and routed directories present, requests are routed per sta
 script/language (`src/router.rs`, a port of the official SDK Router):
 - `english` — ModernBERT-large, 512 tokens (implemented)
 - `typed-decisions` — ModernBERT-large, 1024 tokens (implemented; `model/typed-decisions/`)
-- `multilingual` — mmBERT-base (NOT implemented: `RouterError::MultilingualUnimplemented`)
+- `multilingual` — mmBERT-base, 1024 tokens, 256k vocab, F16 weights (implemented;
+  answers parity-verified against the PyTorch reference on en + zh states, all
+  question types identical to 4 decimals; MASSIVE zh-CN 0.62 vs english ckpt 0.57)
 
 `LAYA_MODEL=english|typed-decisions|auto` forces a route.
 
@@ -42,10 +44,12 @@ pack up automatically (or force with `LAYA_BURNPACK=q8|1`):
 
 | | f32 safetensors | f32 burnpack | q8 burnpack |
 |---|---|---|---|
-| artifact | 804 MB | 1685 MB | **513 MB** |
-| load | ~9 s | ~0.9 s | **~1.7 s** (eager dequant) |
+| english artifact | 804 MB | 1685 MB | **513 MB** |
+| english load | ~9 s | ~0.9 s | **~1.7 s** (eager dequant) |
 | MASSIVE en acc | 0.79 | 0.79 | **0.79** |
 | latency 50-question p50 | 884 ms | — | **865 ms** |
+| multilingual artifact | 804 MB (f16) | — | **377 MB** |
+| MASSIVE zh-CN acc / F1 | 0.62 / 0.518 | — | **0.62 / 0.518** |
 
 Quantized params reload as QFloat tensors that burn's cubecl backend would
 dequantize lazily per tensor on first use (~36 s); `laya_burn::quant::
@@ -80,7 +84,7 @@ english checkpoint on all languages), `evals/latency_baseline.json`.
 | `LAYA_MODEL` | force router route |
 | `LAYA_BURNPACK` | `q8` / `1` (f32) force a pack; unset prefers `model.q8.mpk` then `model.mpk` then safetensors |
 | `LAYA_QUANT=1` | quantize at load (same scheme as the export) |
-| `LAYA_QUANT=<dir>` | export `model.q8.mpk` (binary `laya-burn`) |
+| `LAYA_QUANT=<dir>` | export `model.q8.mpk` for any checkpoint dir (geometry derived from the model) |
 | `LAYA_CONVERT=<dir>` | export f32 burnpack |
 | `LAYA_DTYPE` | `bf16` / `f16` compute dtype (default f32, parity-verified) |
 | `LAYA_DEVICE` | `metal` / `wgpu` (default flex CPU) |
