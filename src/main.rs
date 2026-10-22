@@ -135,23 +135,8 @@ fn quantize_spike(dir: &str, device: &burn::tensor::Device) {
     // ModernBERT-large geometry every Q8-quantized checkpoint here shares).
     let sidecar = dir.to_string() + "/model.mpk.json";
     if !std::path::Path::new(&sidecar).is_file() {
-        // Derive the geometry from the loaded model so any checkpoint works
-        // (english/multilingual differ in vocab, hidden, layers, intermediate).
-        // NB burn Linear stores [in, out]; Wi is [h, 2*intermediate].
-        use burn::module::Module;
-        let m = &q_agent.model;
-        let (vocab, hidden) = {
-            let d = m.tok_embeddings.weight.val().dims();
-            (d[0], d[1])
-        };
-        let spec = laya_burn::skeleton::SkeletonSpec {
-            vocab,
-            hidden,
-            layers: m.layers.len(),
-            intermediate: m.layers[0].wi.weight.val().dims()[1] / 2,
-            head_layers: m.head_layers.len(),
-            sliding_theta: 10_000.0, // every shipped checkpoint (see inference.rs)
-        };
+        // Derive the geometry from the loaded model so any checkpoint works.
+        let spec = laya_burn::skeleton::SkeletonSpec::from_model(&q_agent.model);
         std::fs::write(&sidecar, serde_json::to_string_pretty(&spec).unwrap())
             .expect("write sidecar");
     }
@@ -188,15 +173,10 @@ fn convert_to_burnpack(dir: &str, device: &burn::tensor::Device) {
     let out = dir.to_string() + "/model.mpk";
     let t1 = std::time::Instant::now();
     agent.model.clone().save_file(&out).expect("save burnpack");
-    // Sidecar: the geometry needed to rebuild the module tree from zeros.
-    let spec = laya_burn::skeleton::SkeletonSpec {
-        vocab: 50_368, // per-checkpoint vocab; see README on auto-detection
-        hidden: 1024,
-        layers: 28,
-        intermediate: 2624,
-        head_layers: 2,
-        sliding_theta: 10_000.0,
-    };
+    // Sidecar: complete geometry derived from the loaded model (the old
+    // hardcoded english values would write a wrong sidecar for any other
+    // checkpoint, e.g. model-multilingual's 256k vocab).
+    let spec = laya_burn::skeleton::SkeletonSpec::from_model(&agent.model);
     std::fs::write(
         dir.to_string() + "/model.mpk.json",
         serde_json::to_string_pretty(&spec).unwrap(),

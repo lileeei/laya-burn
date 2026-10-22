@@ -295,50 +295,33 @@ impl RlAgent {
     ) -> Self {
         let w = Weights::from_bytes(weights);
         let cfg: Value = serde_json::from_str(cfg_json).unwrap();
-        let (temperature, temperature_by_options, clamped_temperatures) = read_temperatures(&cfg);
-
-        // Architecture auto-detection from the checkpoint tensor shapes:
-        // tok_embeddings [vocab, hidden] gives hidden (and thus heads = hidden/64);
-        // the highest encoder.layers.N index gives the layer count. Geometry
-        // that is not encoded in shapes (window, thetas, epsilon) matches every
-        // shipped checkpoint so far (128 / 160k / 1e-5); mmBERT uses 160k for
-        // BOTH thetas where large uses 10k sliding - disambiguate via the
-        // encoder/config.json next to the checkpoint when present.
-        let (vocab, hidden) = {
-            let (data, shape) = w.raw_shape("encoder.embeddings.tok_embeddings.weight");
-            let _ = data;
-            (shape[0], shape[1])
-        };
-        let num_layers = w.max_layer_index() + 1;
-        // NB: HF's ModernBertAttention reads the legacy top-level
-        // local_rope_theta (default 10000), NOT the rope_parameters dict some
-        // encoder configs ship - laya-multilingual's config says 160000 there
-        // but the weights were trained with 10000 (verified by parity).
-        let sliding_theta = 10_000.0f32;
-        // Optional override for rope experiments (LAYA_THETA_SLIDE=...).
-        let sliding_theta = std::env::var("LAYA_THETA_SLIDE")
+        let head_layers = cfg["head_layers"].as_u64().unwrap_or(2) as usize;
+        let mut spec = crate::skeleton::SkeletonSpec::from_weights(&w, head_layers);
+        // NB: every shipped checkpoint was trained with sliding theta 10000,
+        // whatever its encoder config's rope_parameters says (verified by
+        // parity). LAYA_THETA_SLIDE overrides for experiments.
+        spec.sliding_theta = std::env::var("LAYA_THETA_SLIDE")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(sliding_theta);
-        let ecfg = EncoderConfig {
-            hidden_size: hidden,
-            num_layers,
-            num_heads: hidden / 64,
-            intermediate_size: if hidden == 1024 { 2624 } else { 1152 },
-            window_size: 128,
-            global_every: 3,
-            max_sequence_length: 1088,
-            rope_theta_full: 160_000.0,
-            rope_theta_sliding: sliding_theta,
-            epsilon: 1e-5,
-        };
-        let _ = vocab;
-        // head_layers comes from the checkpoint config (both ModernBERT-large
-        // checkpoints ship 2; kept configurable for future same-architecture
-        // variants).
-        let head_layers = cfg["head_layers"].as_u64().unwrap_or(2) as usize;
+            .unwrap_or(10_000.0);
+        let ecfg = spec.encoder_config();
         let model = Laya::load(&w, &ecfg, head_layers, device);
-        let ropes = Ropes::new(&ecfg, device);
+        Self::finish(model, &ecfg, cfg_json, tok_json, tok_cfg_json, device)
+    }
+
+    /// Shared constructor tail: ropes, agent config, temperatures, tokenizer.
+    /// Every load* path converges here.
+    fn finish(
+        model: Laya,
+        ecfg: &EncoderConfig,
+        cfg_json: &str,
+        tok_json: &str,
+        tok_cfg_json: Option<&str>,
+        device: &Device,
+    ) -> Self {
+        let cfg: Value = serde_json::from_str(cfg_json).unwrap();
+        let (temperature, temperature_by_options, clamped_temperatures) = read_temperatures(&cfg);
+        let ropes = Ropes::new(ecfg, device);
         let tok = LayaTokenizer::from_json(tok_json, tok_cfg_json);
         let max_len = cfg["max_len"].as_u64().unwrap() as usize;
         let head_max_len = cfg["head_max_len"].as_u64().unwrap() as usize;
@@ -395,18 +378,7 @@ impl RlAgent {
         use burn::module::Module;
 
         let spec: SkeletonSpec = serde_json::from_str(sidecar_json).expect("parse sidecar");
-        let ecfg = crate::model::EncoderConfig {
-            hidden_size: spec.hidden,
-            num_layers: spec.layers,
-            num_heads: spec.hidden / 64,
-            intermediate_size: spec.intermediate,
-            window_size: 128,
-            global_every: 3,
-            max_sequence_length: 1088,
-            rope_theta_full: 160_000.0,
-            rope_theta_sliding: spec.sliding_theta,
-            epsilon: 1e-5,
-        };
+        let ecfg = spec.encoder_config();
         let skel = SkeletonWeights::new(&spec);
         let model = crate::model::Laya::load(&skel, &ecfg, spec.head_layers, device);
         let record = burn::store::ModuleRecord::from_bytes(
@@ -419,23 +391,7 @@ impl RlAgent {
             eprintln!("laya: dequantized {}/{} params from pack", ds.quantized, ds.params);
         }
         let model = crate::quant::cast_compute_dtype(model);
-        let ropes = crate::model::Ropes::new(&ecfg, device);
-
-        let cfg: Value = serde_json::from_str(cfg_json).unwrap();
-        let (temperature, temperature_by_options, clamped_temperatures) = read_temperatures(&cfg);
-        let max_len = cfg["max_len"].as_u64().unwrap() as usize;
-        let head_max_len = cfg["head_max_len"].as_u64().unwrap() as usize;
-        let tok = LayaTokenizer::from_json(tok_json, tok_cfg_json);
-        Self {
-            model,
-            ropes,
-            tok,
-            max_len,
-            head_max_len,
-            temperature,
-            temperature_by_options,
-            clamped_temperatures,
-        }
+        Self::finish(model, &ecfg, cfg_json, tok_json, tok_cfg_json, device)
     }
 
     /// Create the opt-in graph capture/replay engine (LAYA_REPLAY=1).
