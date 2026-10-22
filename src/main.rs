@@ -122,10 +122,30 @@ fn quantize_spike(dir: &str, device: &burn::tensor::Device) {
 
     let mut q_agent = RlAgent::load(dir, device);
     q_agent.model = q_model;
-    let a2 = q_agent.system_one(device, &state, &[question], None);
+    let a2 = q_agent.system_one(device, &state, &[question.clone()], None);
     println!("q8 answers:   {a2:?}");
     let same = format!("{a1:?}") == format!("{a2:?}");
     println!("QUANT ROUND-TRIP: {}", if same { "PASS" } else { "CHECK" });
+
+    // Quantized burnpack export: save the Q8 model, then reload it from the
+    // skeleton path (no safetensors) to prove the quantized bytes survive the
+    // round trip and the file is ~4x smaller than the f32 burnpack.
+    let qpath = dir.to_string() + "/model.q8.mpk";
+    let t2 = std::time::Instant::now();
+    q_agent.model.clone().save_file(&qpath).expect("save quantized burnpack");
+    println!("saved {}: {:?}", qpath, t2.elapsed());
+    let meta = std::fs::metadata(&qpath).expect("stat");
+    println!("quantized burnpack size: {:.0} MB", meta.len() as f64 / 1e6);
+
+    let t3 = std::time::Instant::now();
+    let mut r_agent = RlAgent::load_burnpack(dir, device);
+    let record = burn::store::ModuleRecord::load(&qpath).expect("read q8 burnpack");
+    r_agent.model = r_agent.model.load_record(record);
+    println!("q8 burnpack reload: {:?}", t3.elapsed());
+    let a3 = r_agent.system_one(device, &state, &[question], None);
+    println!("q8 burnpack answers: {a3:?}");
+    let same2 = format!("{a2:?}") == format!("{a3:?}");
+    println!("Q8 BURNPACK ROUND-TRIP: {}", if same2 { "PASS" } else { "CHECK" });
 }
 
 fn convert_to_burnpack(dir: &str, device: &burn::tensor::Device) {
