@@ -115,6 +115,28 @@ Committed results:
 | `LAYA_LOAD` | `bytes` / `q8`: exercise the no-filesystem loaders (the wasm path); answers identical |
 | `LAYA_BATCH_MS` | request micro-batching window in laya-serve |
 
+## Training (direction: trainable)
+
+`cargo run --release --example train_spike` is the trainability gate, and it
+passes end to end:
+
+- **Gradients flow** through the full stack (encoder layer 10 grad norm 2.5,
+  head grad norm 5e-2) on `Device::default().autodiff()`. Params opt in via
+  `Tensor::autodiff().require_grad()` (re-applied after every optimizer step).
+- **Official loss**: `proper_loss_choice` ports rl_common's proper scoring
+  rule (log score + 0.5 spherical; the RPS term is ordinal-only). A fixed
+  6-row batch overfits under AdamW: loss 1.06 -> 0.06 (-94%).
+- **Export back**: `laya_burn::export::export_safetensors` writes the official
+  PyTorch safetensors layout (206 tensors, linear weights un-transposed,
+  `temperature` buffer included) - the reference `RLAgent.load_state_dict`
+  accepts it with `strict=True`, and the fine-tuned weights change its
+  predictions. The spike's 4/6 training-batch hits is the ceiling: two rows
+  are an identical-input/different-gold pair by construction.
+
+Still ahead for a full fine-tune path: dataset loading at scale, the ordinal
+RPS term, temperature refitting after training (official calibrate.py), and
+checkpoint merge with the serving stack.
+
 ## WebAssembly
 
 The full inference stack compiles for wasm32 + WebGPU and now has a runtime

@@ -2,6 +2,7 @@
 //! head) running natively in Rust on the Burn framework.
 
 pub mod calibration;
+pub mod export;
 pub mod inference;
 pub mod model;
 pub mod python_json;
