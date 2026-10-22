@@ -42,6 +42,28 @@ pub fn quantize(model: Laya, device: &Device) -> Laya {
     )
 }
 
+
+struct CastToCompute;
+
+impl ModuleMapper for CastToCompute {
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<D>>) -> Param<Tensor<D>> {
+        // The safetensors path casts per tensor at load (weights.rs); the
+        // burnpack path builds an f32 skeleton and overwrites from an f32
+        // record, so every param needs one cast here for LAYA_DTYPE=bf16/f16
+        // (mixed dtypes panic inside the graph builder).
+        match crate::weights::compute_dtype() {
+            FloatDType::F32 => param,
+            dtype => param.map(|t| t.cast(dtype)),
+        }
+    }
+}
+
+/// Cast every float param of `model` to [crate::weights::compute_dtype].
+/// No-op walk for f32.
+pub fn cast_compute_dtype<M: Module>(model: M) -> M {
+    model.map(&mut CastToCompute)
+}
+
 /// How much work `eager_dequantize` did.
 #[derive(Debug, Default)]
 pub struct DequantStats {

@@ -17,8 +17,20 @@ curl -s localhost:8080/v1/decide -d '{"state": "...", "questions": {...}}'
 
 Checkpoint directories (gitignored, ~800MB each): `model-english/` (english,
 512 tokens), `model/` (second ModernBERT-large checkpoint), `model-multilingual/`
-(see Routing). Each holds `model.safetensors`, `tokenizer/`, `rl_agent_config.json`,
-`encoder/config.json` — download from the HF repo above.
+(mmBERT-base, 1024 tokens, 256k vocab). Each holds `model.safetensors`,
+`tokenizer/`, `rl_agent_config.json`, `encoder/config.json` — download from the
+HF repo above, e.g.:
+
+```
+pip install -U huggingface_hub
+hf download convaiinnovations/laya --include "multilingual/*" --local-dir .
+mv multilingual model-multilingual
+```
+
+(the english checkpoint is the same with `english/*` → `model-english/`; hub
+subfolder names mirror the three checkpoint dirs the Router expects. If a
+`tokenizer_config.json` is missing, an empty `{}` file works - special-token
+names then fall back to the BERT defaults).
 
 With no CLI argument and routed directories present, requests are routed per state
 script/language (`src/router.rs`, a port of the official SDK Router):

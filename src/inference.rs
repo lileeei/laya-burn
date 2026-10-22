@@ -347,6 +347,7 @@ impl RlAgent {
         if ds.quantized > 0 {
             eprintln!("laya: dequantized {}/{} params from pack", ds.quantized, ds.params);
         }
+        let model = crate::quant::cast_compute_dtype(model);
         let ropes = crate::model::Ropes::new(&ecfg, device);
 
         let cfg: Value = serde_json::from_str(cfg_json).unwrap();

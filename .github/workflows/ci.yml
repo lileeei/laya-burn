@@ -1,0 +1,22 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: unit tests
+        run: cargo test --release --locked
+      - name: wasm32 gate (lib, no serve)
+        run: cargo build --release --locked --target wasm32-unknown-unknown -p laya-burn --lib --no-default-features
+      - name: wasm32 gate (runtime surface)
+        working-directory: wasm
+        run: cargo build --release --locked --target wasm32-unknown-unknown --features runtime
