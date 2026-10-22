@@ -76,48 +76,6 @@ async fn models(State(state): State<std::sync::Arc<AppState>>) -> Json<Value> {
     }))
 }
 
-fn render_options(qtype: &str, criteria: &Value) -> Vec<String> {
-    // Criterion text must be the PLAIN string, not serde Display
-    // (which quotes it); non-strings fall back to their JSON form.
-    let text = |v: &Value| -> String {
-        match v {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        }
-    };
-    match qtype {
-        "choice" => criteria
-            .as_object()
-            .map(|m| {
-                m.iter()
-                    .map(|(label, desc)| {
-                        let blank = matches!(desc, Value::Null)
-                            || matches!(desc, Value::String(s) if s.is_empty());
-                        if blank {
-                            label.clone()
-                        } else {
-                            format!("{label}: {}", text(desc))
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-        "score" => criteria
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .enumerate()
-                    .map(|(i, d)| format!("level {i}: {}", text(d)))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        _ => vec![
-            "false: no, the statement does not hold".into(),
-            "true: yes, the statement holds".into(),
-        ],
-    }
-}
-
 async fn decide(
     State(state): State<std::sync::Arc<AppState>>,
     Json(body): Json<Value>,
@@ -138,28 +96,7 @@ async fn decide(
     let questions: Vec<(String, QuestionInput)> = qids
         .iter()
         .filter_map(|qid| {
-            let q = &questions_body[qid];
-            let qtype = q.get("type")?.as_str()?;
-            let idx = match qtype {
-                "choice" => 0,
-                "score" => 1,
-                "noul" => 2,
-                _ => return None,
-            };
-            let instructions = match q.get("instructions") {
-                Some(Value::String(s)) => s.clone(),
-                Some(other) => other.to_string(),
-                None => String::new(),
-            };
-            let criteria = q.get("criteria").cloned().unwrap_or(Value::Null);
-            Some((
-                qid.clone(),
-                QuestionInput {
-                    qtype: idx,
-                    instructions,
-                    options: render_options(qtype, &criteria),
-                },
-            ))
+            laya_burn::inference::question_from_jev(&questions_body[qid]).map(|q| (qid.clone(), q))
         })
         .collect();
 
@@ -246,25 +183,6 @@ async fn batch_flush_loop(
     }
 }
 fn answer_json(q: &QuestionInput, a: &laya_burn::inference::Answer) -> Value {
-    use laya_burn::inference::Answer;
-    match a {
-        Answer::Choice { index, probabilities, confidence } => json!({
-            "type": "choice",
-            "choice": q.options.get(*index).cloned().unwrap_or_default(),
-            "probabilities": q.options.iter().zip(probabilities.iter())
-                .map(|(o, p)| (o.clone(), json!(p)))
-                .collect::<serde_json::Map<String, Value>>(),
-            "confidence": confidence,
-        }),
-        Answer::Score { score, probabilities, confidence } => json!({
-            "type": "score",
-            "score": score,
-            "probabilities": probabilities,
-            "confidence": confidence,
-        }),
-        Answer::Noul { prob } => json!({
-            "type": "noul",
-            "noul": prob,
-        }),
-    }
+    laya_burn::inference::answer_to_json(q, a)
 }
+

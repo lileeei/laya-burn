@@ -284,7 +284,27 @@ fn run_routed(router: &Router, _device: &Device) {
 fn run_single(model_dir: &str, device: &Device) {
     println!("loading laya from {model_dir} ...");
     let t0 = std::time::Instant::now();
-    let agent = RlAgent::load(model_dir, device);
+    // LAYA_LOAD=bytes|q8 exercises the no-filesystem loaders (the wasm
+    // runtime path) on native: same bytes, answers must be identical.
+    let agent = match std::env::var("LAYA_LOAD").as_deref() {
+        Ok("bytes") => {
+            let weights = std::fs::read(format!("{model_dir}/model.safetensors")).unwrap();
+            let cfg = std::fs::read_to_string(format!("{model_dir}/rl_agent_config.json")).unwrap();
+            let tok = std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer.json")).unwrap();
+            let tok_cfg = std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer_config.json")).ok();
+            RlAgent::load_bytes(weights, &cfg, &tok, tok_cfg.as_deref(), device)
+        }
+        Ok("q8") => {
+            let pack = std::fs::read(format!("{model_dir}/model.q8.mpk"))
+                .expect("model.q8.mpk missing: export with LAYA_QUANT first");
+            let sidecar = std::fs::read_to_string(format!("{model_dir}/model.mpk.json")).unwrap();
+            let cfg = std::fs::read_to_string(format!("{model_dir}/rl_agent_config.json")).unwrap();
+            let tok = std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer.json")).unwrap();
+            let tok_cfg = std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer_config.json")).ok();
+            RlAgent::load_q8_bytes(pack, &sidecar, &cfg, &tok, tok_cfg.as_deref(), device)
+        }
+        _ => RlAgent::load(model_dir, device),
+    };
     println!("model loaded in {:.2?}", t0.elapsed());
 
     let questions = demo_questions();

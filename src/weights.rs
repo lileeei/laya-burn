@@ -67,9 +67,12 @@ impl WeightSource for Weights {
 
 impl Weights {
     pub fn open(path: &str) -> Self {
-        Self {
-            bytes: std::fs::read(path).expect("read safetensors file"),
-        }
+        Self::from_bytes(std::fs::read(path).expect("read safetensors file"))
+    }
+
+    /// No-filesystem variant of [Weights::open] for embedders (wasm).
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self { bytes }
     }
 
     /// Raw F32 data of a tensor in stored (PyTorch) orientation.

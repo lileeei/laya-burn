@@ -135,3 +135,32 @@ spike's `laya` feature then becomes the gate to re-run.
 - `wasm/src/lib.rs` — `webgpu_tensor_sum()` (A), `tokenizer_probe()` (B)
 - `wasm/REPORT.md` — this report
 - `wasm/Cargo.lock`, `wasm/target/` — build outputs
+
+---
+
+## Update 2026-10-22: runtime surface compiles; fs is off the hot path
+
+Everything in "Realistic path to a browser demo" steps 1-2 plus half of 4 is
+now done at the compile level, in the parent:
+
+- The parent gates its server stack behind a `serve` feature (default on for
+  native; `--no-default-features` drops axum/tokio, whose mio dependency was
+  the thing that did not compile for wasm32).
+- `laya-burn` (lib) builds for wasm32-unknown-unknown with the full inference
+  stack: tokenizer, encoder, head, calibration, router, quant/eager dequant.
+- New no-filesystem loaders `RlAgent::load_bytes` / `RlAgent::load_q8_bytes`
+  (plus `Weights::from_bytes`, `LayaTokenizer::from_json`,
+  `ModuleRecord::from_bytes`) remove the std::fs requirement REPORT step 4
+  called out. Verified on native: `LAYA_LOAD=bytes|q8` reproduces the
+  file-loaded answers bit-identically (f32) and at Q8 noise level (q8 pack).
+- The spike crate grew a `runtime` feature: `laya_init_q8` / `laya_decide`
+  (wasm-bindgen), thread-local agent on `Device::webgpu`.
+
+Gate (all exit 0):
+
+    cargo build --target wasm32-unknown-unknown -p laya-burn --lib --no-default-features
+    cargo build --manifest-path wasm/Cargo.toml --target wasm32-unknown-unknown --features runtime
+
+Still open for a real browser demo: wasm-pack/trunk packaging, async device
+init via wasm-bindgen-futures (REPORT step 3), a demo page, and the
+runtime-perf question (autotune in a browser, dequant cost on WebGPU).

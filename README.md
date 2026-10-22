@@ -91,14 +91,24 @@ english checkpoint on all languages), `evals/latency_baseline.json`.
 | `LAYA_REPLAY=1` | graph capture/replay fast path |
 | `LAYA_ATTN=manual` | manual sliding-window attention (default: blocked fast path) |
 | `LAYA_UNCLAMPED=1` | raw fitted temperatures (official harness mode) |
+| `LAYA_LOAD` | `bytes` / `q8`: exercise the no-filesystem loaders (the wasm path); answers identical |
 | `LAYA_BATCH_MS` | request micro-batching window in laya-serve |
 
 ## WebAssembly
 
-The full stack compiles for wasm32 + WebGPU; see `wasm/REPORT.md` for the
-build recipe and the one-time parent fix (target-conditional `tokenizers`
-features, already applied in `Cargo.toml`). Browser runtime work (weights via
-fetch, packaging) is not done yet.
+The full inference stack compiles for wasm32 + WebGPU and now has a runtime
+surface (`wasm/` crate, feature `runtime`): `laya_init_q8(pack_bytes, sidecar,
+cfg, tokenizer, tokenizer_cfg)` builds the agent from fetched bytes - no
+std::fs anywhere on that path (`RlAgent::load_bytes` / `RlAgent::load_q8_bytes`
+are the no-filesystem loaders, parity-identical on native via `LAYA_LOAD`) -
+and `laya_decide(state, questions_json)` returns /v1/decide-shaped answers.
+The `serve` feature (axum/tokio) is default-on for native builds and absent
+from wasm builds.
+
+Gate: `cargo build --manifest-path wasm/Cargo.toml --target
+wasm32-unknown-unknown --features runtime`. Remaining for a browser demo:
+wasm-pack packaging, async WebGPU device init, a demo page (see
+`wasm/REPORT.md`).
 
 ## Repository layout
 

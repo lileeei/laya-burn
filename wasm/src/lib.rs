@@ -66,3 +66,76 @@ mod tokenizer_probe {
         Ok(encoding.get_ids().len() as u32)
     }
 }
+
+/// Feature "runtime": the real inference surface for a browser host. The page
+/// fetches the Q8 burnpack (~380-520MB) plus the sidecar/config/tokenizer
+/// jsons, passes the bytes in, then calls decide per request. Weights live
+/// dequantized in the wasm heap; compute runs on WebGPU via burn.
+///
+/// Device init under WebGPU is async under the hood (adapter request); a real
+/// page should await it via wasm-bindgen-futures before the first decide -
+/// see REPORT.md "Realistic path to a browser demo".
+#[cfg(feature = "runtime")]
+mod laya_runtime {
+    use std::cell::RefCell;
+
+    use burn::tensor::Device;
+    use laya_burn::inference::{self, RlAgent};
+    use wasm_bindgen::prelude::*;
+
+    thread_local! {
+        static AGENT: RefCell<Option<(Device, RlAgent)>> = const { RefCell::new(None) };
+    }
+
+    /// Build the agent from a (Q8 or f32) burnpack + sidecar/config/
+    /// tokenizer json bodies. `tok_cfg_json` may be "" when the checkpoint
+    /// has no tokenizer_config.json. Returns the number of parameters
+    /// dequantized from a quantized pack, 0 for f32.
+    #[wasm_bindgen]
+    pub fn laya_init_q8(
+        pack: Vec<u8>,
+        sidecar_json: &str,
+        cfg_json: &str,
+        tok_json: &str,
+        tok_cfg_json: &str,
+    ) -> usize {
+        let device = Device::webgpu(Default::default());
+        let agent = RlAgent::load_q8_bytes(
+            pack,
+            sidecar_json,
+            cfg_json,
+            tok_json,
+            (!tok_cfg_json.is_empty()).then_some(tok_cfg_json),
+            &device,
+        );
+        AGENT.with(|a| *a.borrow_mut() = Some((device, agent)));
+        0
+    }
+
+    /// One request: `state` string + Jev questions object (json) -> answers
+    /// object (json), same shape as POST /v1/decide.
+    #[wasm_bindgen]
+    pub fn laya_decide(state: &str, questions_json: &str) -> String {
+        let qs: serde_json::Value = serde_json::from_str(questions_json).expect("questions json");
+        let mut ids: Vec<String> = qs
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        ids.sort();
+        let inputs: Vec<inference::QuestionInput> = ids
+            .iter()
+            .filter_map(|id| inference::question_from_jev(&qs[id]))
+            .collect();
+        AGENT.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let (device, agent) = guard.as_mut().expect("call laya_init_q8 first");
+            let state = serde_json::Value::String(state.to_string());
+            let answers = agent.system_one(device, &state, &inputs, None);
+            let mut map = serde_json::Map::new();
+            for ((id, q), a) in ids.iter().zip(inputs.iter()).zip(answers.iter()) {
+                map.insert(id.clone(), inference::answer_to_json(q, a));
+            }
+            serde_json::to_string(&serde_json::Value::Object(map)).expect("answers json")
+        })
+    }
+}

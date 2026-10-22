@@ -67,60 +67,164 @@ fn confidence_from_probs(p: &[f32]) -> f32 {
     1.0 - ent / (p.len() as f32).ln()
 }
 
-impl RlAgent {
-    pub fn load(model_dir: &str, device: &Device) -> Self {
-        let w = Weights::open(&format!("{model_dir}/model.safetensors"));
-        let cfg: Value =
-            serde_json::from_str(&std::fs::read_to_string(format!("{model_dir}/rl_agent_config.json")).unwrap())
-                .unwrap();
-        let max_len = cfg["max_len"].as_u64().unwrap() as usize;
-        let head_max_len = cfg["head_max_len"].as_u64().unwrap() as usize;
-        // Clamp every fitted temperature to [0.5, 5.0] (official SDK behavior, issue #42):
-        // a sub-0.5 temperature would sharpen logits and overstate confidence.
-        // LAYA_UNCLAMPED=1 keeps the RAW fitted temperatures - what the
-        // official harness uses to reproduce its committed sweep numbers
-        // (--unclamped), as opposed to the clamped readout the SDK applies.
-        let maybe_clamp = |raw: f64| {
-            if std::env::var("LAYA_UNCLAMPED").as_deref() == Ok("1") {
-                raw
-            } else {
-                Calibration::clamp_temperature(raw)
+/// Clamp every fitted temperature to [0.5, 5.0] (official SDK behavior, issue
+/// #42): a sub-0.5 temperature would sharpen logits and overstate confidence.
+/// LAYA_UNCLAMPED=1 keeps the RAW fitted temperatures - what the official
+/// harness uses to reproduce its committed sweep numbers (--unclamped), as
+/// opposed to the clamped readout the SDK applies.
+fn read_temperatures(cfg: &Value) -> ([f64; 3], Vec<(String, f64)>, Vec<String>) {
+    let maybe_clamp = |raw: f64| {
+        if std::env::var("LAYA_UNCLAMPED").as_deref() == Ok("1") {
+            raw
+        } else {
+            crate::calibration::Calibration::clamp_temperature(raw)
+        }
+    };
+    let temperature = [
+        maybe_clamp(cfg["temperature"][0].as_f64().unwrap_or(1.0)),
+        maybe_clamp(cfg["temperature"][1].as_f64().unwrap_or(1.0)),
+        maybe_clamp(cfg["temperature"][2].as_f64().unwrap_or(1.0)),
+    ];
+    let temperature_by_options: Vec<(String, f64)> = cfg["temperature_by_options"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), maybe_clamp(v.as_f64().unwrap_or(1.0))))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut clamped_temperatures = Vec::new();
+    if let Some(m) = cfg["temperature_by_options"].as_object() {
+        for (k, v) in m {
+            let raw = v.as_f64().unwrap_or(1.0);
+            if crate::calibration::Calibration::clamp_temperature(raw) != raw {
+                clamped_temperatures.push(format!("{k}={raw}"));
             }
-        };
-        let temperature = [
-            maybe_clamp(cfg["temperature"][0].as_f64().unwrap_or(1.0)),
-            maybe_clamp(cfg["temperature"][1].as_f64().unwrap_or(1.0)),
-            maybe_clamp(cfg["temperature"][2].as_f64().unwrap_or(1.0)),
-        ];
-        let temperature_by_options: Vec<(String, f64)> = cfg["temperature_by_options"]
+        }
+    }
+    for (i, t) in cfg["temperature"].as_array().unwrap_or(&vec![]).iter().enumerate().take(3) {
+        let raw = t.as_f64().unwrap_or(1.0);
+        if crate::calibration::Calibration::clamp_temperature(raw) != raw {
+            clamped_temperatures.push(format!("temperature[{i}]={raw}"));
+        }
+    }
+    if !clamped_temperatures.is_empty() {
+        eprintln!("clamped temperatures: {clamped_temperatures:?}");
+    }
+    (temperature, temperature_by_options, clamped_temperatures)
+}
+
+/// Jev request shape ({type, instructions, criteria}) -> [QuestionInput].
+/// A port of rl_common.render_options; shared by laya-serve and the wasm
+/// runtime so the option text is rendered identically everywhere.
+pub fn question_from_jev(q: &Value) -> Option<QuestionInput> {
+    let qtype = q.get("type")?.as_str()?;
+    let idx = match qtype {
+        "choice" => 0,
+        "score" => 1,
+        "noul" => 2,
+        _ => return None,
+    };
+    let instructions = match q.get("instructions") {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    };
+    let criteria = q.get("criteria").cloned().unwrap_or(Value::Null);
+    Some(QuestionInput { qtype: idx, instructions, options: render_options(qtype, &criteria) })
+}
+
+/// Criterion text must be the PLAIN string, not serde Display (which quotes
+/// it); non-strings fall back to their JSON form.
+fn render_options(qtype: &str, criteria: &Value) -> Vec<String> {
+    let text = |v: &Value| -> String {
+        match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }
+    };
+    match qtype {
+        "choice" => criteria
             .as_object()
             .map(|m| {
                 m.iter()
-                    .map(|(k, v)| {
-                        let raw = v.as_f64().unwrap_or(1.0);
-                        (k.clone(), maybe_clamp(raw))
+                    .map(|(label, desc)| {
+                        let blank = matches!(desc, Value::Null)
+                            || matches!(desc, Value::String(s) if s.is_empty());
+                        if blank {
+                            label.clone()
+                        } else {
+                            format!("{label}: {}", text(desc))
+                        }
                     })
                     .collect()
             })
-            .unwrap_or_default();
-        let mut clamped_temperatures = Vec::new();
-        if let Some(m) = cfg["temperature_by_options"].as_object() {
-            for (k, v) in m {
-                let raw = v.as_f64().unwrap_or(1.0);
-                if Calibration::clamp_temperature(raw) != raw {
-                    clamped_temperatures.push(format!("{k}={raw}"));
-                }
-            }
-        }
-        for (i, t) in cfg["temperature"].as_array().unwrap_or(&vec![]).iter().enumerate().take(3) {
-            let raw = t.as_f64().unwrap_or(1.0);
-            if Calibration::clamp_temperature(raw) != raw {
-                clamped_temperatures.push(format!("temperature[{i}]={raw}"));
-            }
-        }
-        if !clamped_temperatures.is_empty() {
-            eprintln!("clamped temperatures: {clamped_temperatures:?}");
-        }
+            .unwrap_or_default(),
+        "score" => criteria
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .enumerate()
+                    .map(|(i, d)| format!("level {i}: {}", text(d)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => vec![
+            "false: no, the statement does not hold".into(),
+            "true: yes, the statement holds".into(),
+        ],
+    }
+}
+
+/// Answer in the official response shape (what POST /v1/decide returns).
+pub fn answer_to_json(q: &QuestionInput, a: &Answer) -> Value {
+    match a {
+        Answer::Choice { index, probabilities, confidence } => serde_json::json!({
+            "type": "choice",
+            "choice": q.options.get(*index).cloned().unwrap_or_default(),
+            "probabilities": q.options.iter().zip(probabilities.iter())
+                .map(|(o, p)| (o.clone(), serde_json::json!(p)))
+                .collect::<serde_json::Map<String, Value>>(),
+            "confidence": confidence,
+        }),
+        Answer::Score { score, probabilities, confidence } => serde_json::json!({
+            "type": "score",
+            "score": score,
+            "probabilities": probabilities,
+            "confidence": confidence,
+        }),
+        Answer::Noul { prob } => serde_json::json!({
+            "type": "noul",
+            "noul": prob,
+        }),
+    }
+}
+
+impl RlAgent {
+    pub fn load(model_dir: &str, device: &Device) -> Self {
+        let weights =
+            std::fs::read(format!("{model_dir}/model.safetensors")).expect("read safetensors");
+        let cfg_json =
+            std::fs::read_to_string(format!("{model_dir}/rl_agent_config.json")).unwrap();
+        let tok_json =
+            std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer.json")).unwrap();
+        let tok_cfg = std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer_config.json")).ok();
+        Self::load_bytes(weights, &cfg_json, &tok_json, tok_cfg.as_deref(), device)
+    }
+
+    /// No-filesystem variant of [RlAgent::load] for embedders that fetch
+    /// bytes (wasm): safetensors body + rl_agent_config.json +
+    /// tokenizer.json + optional tokenizer_config.json bodies.
+    pub fn load_bytes(
+        weights: Vec<u8>,
+        cfg_json: &str,
+        tok_json: &str,
+        tok_cfg_json: Option<&str>,
+        device: &Device,
+    ) -> Self {
+        let w = Weights::from_bytes(weights);
+        let cfg: Value = serde_json::from_str(cfg_json).unwrap();
+        let (temperature, temperature_by_options, clamped_temperatures) = read_temperatures(&cfg);
 
         // Architecture auto-detection from the checkpoint tensor shapes:
         // tok_embeddings [vocab, hidden] gives hidden (and thus heads = hidden/64);
@@ -164,7 +268,9 @@ impl RlAgent {
         let head_layers = cfg["head_layers"].as_u64().unwrap_or(2) as usize;
         let model = Laya::load(&w, &ecfg, head_layers, device);
         let ropes = Ropes::new(&ecfg, device);
-        let tok = LayaTokenizer::load(&format!("{model_dir}/tokenizer/tokenizer.json"));
+        let tok = LayaTokenizer::from_json(tok_json, tok_cfg_json);
+        let max_len = cfg["max_len"].as_u64().unwrap() as usize;
+        let head_max_len = cfg["head_max_len"].as_u64().unwrap() as usize;
         Self { model, ropes, tok, max_len, head_max_len, temperature, temperature_by_options, clamped_temperatures }
     }
 
@@ -182,14 +288,42 @@ impl RlAgent {
     /// QFloat params from a quantized pack are dequantized eagerly in plain
     /// Rust: burn's lazy per-tensor kernel dequant costs ~36s on first use.
     pub fn load_burnpack_named(model_dir: &str, pack: &str, device: &Device) -> Self {
-        use crate::calibration::Calibration;
+        let sidecar =
+            std::fs::read_to_string(format!("{model_dir}/model.mpk.json")).expect("sidecar");
+        let cfg_json =
+            std::fs::read_to_string(format!("{model_dir}/rl_agent_config.json")).unwrap();
+        let tok_json =
+            std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer.json")).unwrap();
+        let tok_cfg =
+            std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer_config.json")).ok();
+        let pack_bytes =
+            std::fs::read(format!("{model_dir}/{pack}")).expect("read burnpack");
+        Self::load_q8_bytes(
+            pack_bytes,
+            &sidecar,
+            &cfg_json,
+            &tok_json,
+            tok_cfg.as_deref(),
+            device,
+        )
+    }
+
+    /// No-filesystem burnpack loader for embedders that fetch bytes (wasm):
+    /// the pack body (f32 or Q8 - quantized params dequantize eagerly), the
+    /// geometry sidecar, rl_agent_config.json, tokenizer.json and the
+    /// optional tokenizer_config.json.
+    pub fn load_q8_bytes(
+        pack: Vec<u8>,
+        sidecar_json: &str,
+        cfg_json: &str,
+        tok_json: &str,
+        tok_cfg_json: Option<&str>,
+        device: &Device,
+    ) -> Self {
         use crate::skeleton::{SkeletonSpec, SkeletonWeights};
         use burn::module::Module;
 
-        let spec: SkeletonSpec = serde_json::from_str(
-            &std::fs::read_to_string(format!("{model_dir}/model.mpk.json")).expect("sidecar"),
-        )
-        .expect("parse sidecar");
+        let spec: SkeletonSpec = serde_json::from_str(sidecar_json).expect("parse sidecar");
         let ecfg = crate::model::EncoderConfig {
             hidden_size: spec.hidden,
             num_layers: spec.layers,
@@ -204,47 +338,22 @@ impl RlAgent {
         };
         let skel = SkeletonWeights::new(&spec);
         let model = crate::model::Laya::load(&skel, &ecfg, spec.head_layers, device);
-        let record =
-            burn::store::ModuleRecord::load(format!("{model_dir}/{pack}")).expect("read burnpack");
+        let record = burn::store::ModuleRecord::from_bytes(
+            burn::tensor::Bytes::from_bytes_vec(pack),
+        )
+        .expect("read burnpack");
         let model = model.load_record(record);
         let (model, ds) = crate::quant::eager_dequantize(model);
         if ds.quantized > 0 {
-            eprintln!("laya: dequantized {}/{} params from {pack}", ds.quantized, ds.params);
+            eprintln!("laya: dequantized {}/{} params from pack", ds.quantized, ds.params);
         }
         let ropes = crate::model::Ropes::new(&ecfg, device);
 
-        let cfg: Value = serde_json::from_str(
-            &std::fs::read_to_string(format!("{model_dir}/rl_agent_config.json")).unwrap(),
-        )
-        .unwrap();
+        let cfg: Value = serde_json::from_str(cfg_json).unwrap();
+        let (temperature, temperature_by_options, clamped_temperatures) = read_temperatures(&cfg);
         let max_len = cfg["max_len"].as_u64().unwrap() as usize;
         let head_max_len = cfg["head_max_len"].as_u64().unwrap() as usize;
-        // LAYA_UNCLAMPED=1 keeps the RAW fitted temperatures - what the
-        // official harness uses to reproduce its committed sweep numbers
-        // (--unclamped), as opposed to the clamped readout the SDK applies.
-        let maybe_clamp = |raw: f64| {
-            if std::env::var("LAYA_UNCLAMPED").as_deref() == Ok("1") {
-                raw
-            } else {
-                Calibration::clamp_temperature(raw)
-            }
-        };
-        let temperature = [
-            maybe_clamp(cfg["temperature"][0].as_f64().unwrap_or(1.0)),
-            maybe_clamp(cfg["temperature"][1].as_f64().unwrap_or(1.0)),
-            maybe_clamp(cfg["temperature"][2].as_f64().unwrap_or(1.0)),
-        ];
-        let temperature_by_options: Vec<(String, f64)> = cfg["temperature_by_options"]
-            .as_object()
-            .map(|m| {
-                m.iter()
-                    .map(|(k, v)| {
-                        (k.clone(), maybe_clamp(v.as_f64().unwrap_or(1.0)))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let tok = crate::tokenizer::LayaTokenizer::load(&format!("{model_dir}/tokenizer/tokenizer.json"));
+        let tok = LayaTokenizer::from_json(tok_json, tok_cfg_json);
         Self {
             model,
             ropes,
@@ -253,7 +362,7 @@ impl RlAgent {
             head_max_len,
             temperature,
             temperature_by_options,
-            clamped_temperatures: Vec::new(),
+            clamped_temperatures,
         }
     }
 

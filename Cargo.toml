@@ -14,8 +14,19 @@ safetensors = "0.8"
 tokenizers = { version = "0.23", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+# Server stack: optional so wasm32 builds (--no-default-features) skip
+# tokio/mio, which do not compile for wasm32-unknown-unknown.
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"], optional = true }
+
+[features]
+default = ["serve"]
+serve = ["dep:axum", "dep:tokio"]
+
+[[bin]]
+name = "laya-serve"
+path = "src/bin/laya-serve.rs"
+required-features = ["serve"]
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }

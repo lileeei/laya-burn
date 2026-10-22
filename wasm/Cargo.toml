@@ -35,12 +35,17 @@ tokenizers = { version = "0.23", default-features = false, features = ["unstable
 
 # Full stack: the parent crate. Optional so the proven core (Milestone A) keeps
 # building even while the parent's feature set is under investigation.
-laya-burn = { path = "../", optional = true }
+# default-features = false: the parent's default "serve" feature pulls
+# tokio/mio, which do not compile for wasm32-unknown-unknown.
+laya-burn = { path = "../", default-features = false, optional = true }
+serde_json = "1"
 
 [features]
 default = []
 tokenizer = ["dep:tokenizers"]
 laya = ["dep:laya-burn"]
+# The real runtime surface: init from fetched bytes + decide, on WebGPU.
+runtime = ["dep:laya-burn"]
 full = ["laya", "tokenizer"]
 # Reproduces exactly what feature unification does to the burn crate when the
 # parent laya-burn is linked (its burn dep hard-codes these features), without

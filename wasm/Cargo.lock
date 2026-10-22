@@ -3977,6 +3977,7 @@ dependencies = [
  "cubecl",
  "getrandom 0.4.3",
  "safetensors 0.8.0",
+ "serde",
  "serde_json",
  "tokenizers",
 ]
@@ -3988,6 +3989,7 @@ dependencies = [
  "burn",
  "getrandom 0.4.3",
  "laya-burn",
+ "serde_json",
  "tokenizers",
  "wasm-bindgen",
 ]
