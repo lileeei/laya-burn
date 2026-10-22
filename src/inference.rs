@@ -29,6 +29,11 @@ pub struct QuestionInput {
     pub qtype: usize, // 0=choice 1=score 2=noul
     pub instructions: String,
     pub options: Vec<String>,
+    /// The raw criteria keys behind `options` (Jev request shape): the
+    /// official answer contract reports the KEY as `choice`, not the rendered
+    /// option text. Empty for direct API use - answer_to_json then falls back
+    /// to the rendered option.
+    pub keys: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,14 +42,19 @@ pub enum Answer {
         index: usize,
         probabilities: Vec<f32>,
         confidence: f32,
+        /// P(act) from the act head (saturated ~1.0 in the shipped
+        /// checkpoints - the official act_head_eval measures, not trusts it).
+        act_probability: f32,
     },
     Score {
         score: f32,
         probabilities: Vec<f32>,
         confidence: f32,
+        act_probability: f32,
     },
     Noul {
         prob: f32,
+        act_probability: f32,
     },
 }
 
@@ -131,7 +141,11 @@ pub fn question_from_jev(q: &Value) -> Option<QuestionInput> {
         None => String::new(),
     };
     let criteria = q.get("criteria").cloned().unwrap_or(Value::Null);
-    Some(QuestionInput { qtype: idx, instructions, options: render_options(qtype, &criteria) })
+    let keys = match (qtype, &criteria) {
+        ("choice", Value::Object(m)) => m.keys().cloned().collect(),
+        _ => Vec::new(),
+    };
+    Some(QuestionInput { qtype: idx, instructions, options: render_options(qtype, &criteria), keys })
 }
 
 /// Criterion text must be the PLAIN string, not serde Display (which quotes
@@ -179,23 +193,36 @@ fn render_options(qtype: &str, criteria: &Value) -> Vec<String> {
 /// Answer in the official response shape (what POST /v1/decide returns).
 pub fn answer_to_json(q: &QuestionInput, a: &Answer) -> Value {
     match a {
-        Answer::Choice { index, probabilities, confidence } => serde_json::json!({
+        Answer::Choice { index, probabilities, confidence, act_probability } => serde_json::json!({
             "type": "choice",
-            "choice": q.options.get(*index).cloned().unwrap_or_default(),
+            "choice": q.keys.get(*index).or_else(|| q.options.get(*index)).cloned().unwrap_or_default(),
             "probabilities": q.options.iter().zip(probabilities.iter())
                 .map(|(o, p)| (o.clone(), serde_json::json!(p)))
                 .collect::<serde_json::Map<String, Value>>(),
+            // p(reported answer): the column laya.evals calibration metrics
+            // read (NOT the entropy-derived `confidence` above, which moves
+            // with option count - official evals.py refuses it for exactly
+            // that reason).
+            "answer_confidence": probabilities.get(*index).copied().unwrap_or(*confidence),
             "confidence": confidence,
+            "action": {"act_probability": act_probability},
         }),
-        Answer::Score { score, probabilities, confidence } => serde_json::json!({
+        Answer::Score { score, probabilities, confidence, act_probability } => serde_json::json!({
             "type": "score",
             "score": score,
             "probabilities": probabilities,
+            "answer_confidence": probabilities
+                .iter()
+                .cloned()
+                .fold(f32::MIN, f32::max),
             "confidence": confidence,
+            "action": {"act_probability": act_probability},
         }),
-        Answer::Noul { prob } => serde_json::json!({
+        Answer::Noul { prob, act_probability } => serde_json::json!({
             "type": "noul",
             "noul": prob,
+            "answer_confidence": prob.max(1.0 - prob),
+            "action": {"act_probability": act_probability},
         }),
     }
 }
@@ -449,22 +476,25 @@ impl RlAgent {
                 .unwrap_or(self.temperature[q.qtype]);
             let z: Vec<f32> = (0..k).map(|c| logits[r * n_markers + c]).collect();
             let p = Calibration::probabilities(&z, k, temp);
-            let answer = match q.qtype {
+            let act_probability = Calibration::round4(act[0]) as f32;
+                let answer = match q.qtype {
                 0 => Answer::Choice {
                     index: Calibration::arg_max(&p),
                     probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
                     confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
+                    act_probability,
                 },
                 1 => Answer::Score {
                     score: Calibration::round4(Calibration::expected_score(&p)) as f32,
                     probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
                     confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
+                    act_probability,
                 },
                 _ => Answer::Noul {
                     prob: Calibration::round4(p[1]) as f32,
+                    act_probability,
                 },
             };
-            let _ = act;
             answers.push(answer);
         }
         answers
@@ -568,22 +598,25 @@ impl RlAgent {
                 .unwrap_or(self.temperature[q.qtype]);
             let z: Vec<f32> = (0..k).map(|c| logits[r * n_markers + c]).collect();
             let p = Calibration::probabilities(&z, k, temp);
-            let answer = match q.qtype {
+            let act_probability = Calibration::round4(act[0]) as f32;
+                let answer = match q.qtype {
                 0 => Answer::Choice {
                     index: Calibration::arg_max(&p),
                     probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
                     confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
+                    act_probability,
                 },
                 1 => Answer::Score {
                     score: Calibration::round4(Calibration::expected_score(&p)) as f32,
                     probabilities: p.iter().map(|v| Calibration::round4(*v) as f32).collect(),
                     confidence: Calibration::round4(Calibration::answer_confidence(&p, k)) as f32,
+                    act_probability,
                 },
                 _ => Answer::Noul {
                     prob: Calibration::round4(p[1]) as f32,
+                    act_probability,
                 },
             };
-            let _ = act;
             answers.push(answer);
         }
 

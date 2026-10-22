@@ -30,6 +30,7 @@ fn demo_questions() -> Vec<QuestionInput> {
             qtype: 0,
             instructions: "Which option is the largest number?".to_string(),
             options: (1..=12).map(|n| n.to_string()).collect(),
+            keys: vec![],
         },
         // obvious noul statement.
         QuestionInput {
@@ -39,6 +40,7 @@ fn demo_questions() -> Vec<QuestionInput> {
                 "false: no, the statement does not hold".to_string(),
                 "true: yes, the statement holds".to_string(),
             ],
+            keys: vec![],
         },
         QuestionInput {
             qtype: 0, // choice
@@ -49,6 +51,7 @@ fn demo_questions() -> Vec<QuestionInput> {
                 "onnxruntime".into(),
                 "libtorch".into(),
             ],
+            keys: vec![],
         },
         QuestionInput {
             qtype: 2, // noul
@@ -57,6 +60,7 @@ fn demo_questions() -> Vec<QuestionInput> {
                 "false: no, the statement does not hold".to_string(),
                 "true: yes, the statement holds".to_string(),
             ],
+            keys: vec![],
         },
         QuestionInput {
             qtype: 1, // score
@@ -68,6 +72,7 @@ fn demo_questions() -> Vec<QuestionInput> {
                 "level 3: very useful".into(),
                 "level 4: essential".into(),
             ],
+            keys: vec![],
         },
     ]
 }
@@ -109,6 +114,7 @@ fn quantize_spike(dir: &str, device: &burn::tensor::Device) {
         qtype: 0,
         instructions: "Which runtime should host the model for CPU inference in Rust?".to_string(),
         options: vec!["burn".into(), "candle".into(), "onnxruntime".into(), "libtorch".into()],
+        keys: vec![],
     };
     let state = serde_json::Value::String(
         "The user is deciding whether to run a 421M non-autoregressive decision model in Rust.".to_string(),
@@ -210,6 +216,7 @@ fn convert_to_burnpack(dir: &str, device: &burn::tensor::Device) {
         qtype: 0,
         instructions: "Which runtime should host the model for CPU inference in Rust?".to_string(),
         options: vec!["burn".into(), "candle".into(), "onnxruntime".into(), "libtorch".into()],
+        keys: vec![],
     };
     let state = serde_json::Value::String(
         "The user is deciding whether to run a 421M non-autoregressive decision model in Rust.".to_string(),

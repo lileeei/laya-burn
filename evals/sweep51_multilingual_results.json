@@ -1,0 +1,212 @@
+{
+ "_meta": {
+  "finding": "ours 0.3692 vs official 0.4008; the gap concentrates in bn/kn/hy/ta/ml (-0.06..-0.14) while zh/ja/ar/th/km match exactly. Tokenizer ids verified identical on 180 sequences across those scripts, config matches (1024/256), and the LOCAL PyTorch reference scores 10/30 on bn (~0.33) like Rust - so the port is faithful to the local checkpoint and the official refreshed numbers reflect a newer package snapshot (the official repo's own #208 records the multilingual columns not reproducing and being refreshed at laya 0.3.20).",
+  "macro_accuracy": 0.3692,
+  "method": "multilingual checkpoint forced on all 51 languages (LAYA_MODEL=multilingual), same protocol as the other sweeps",
+  "official_refreshed_macro": 0.4008
+ },
+ "af": {
+  "accuracy": 0.33,
+  "n": 100
+ },
+ "am": {
+  "accuracy": 0.13,
+  "n": 100
+ },
+ "ar": {
+  "accuracy": 0.46,
+  "n": 100
+ },
+ "az": {
+  "accuracy": 0.3,
+  "n": 100
+ },
+ "bn": {
+  "accuracy": 0.31,
+  "n": 100
+ },
+ "cy": {
+  "accuracy": 0.14,
+  "n": 100
+ },
+ "da": {
+  "accuracy": 0.53,
+  "n": 100
+ },
+ "de": {
+  "accuracy": 0.51,
+  "n": 100
+ },
+ "el": {
+  "accuracy": 0.36,
+  "n": 100
+ },
+ "en": {
+  "accuracy": 0.69,
+  "n": 100
+ },
+ "es": {
+  "accuracy": 0.53,
+  "n": 100
+ },
+ "fa": {
+  "accuracy": 0.42,
+  "n": 100
+ },
+ "fi": {
+  "accuracy": 0.29,
+  "n": 100
+ },
+ "fr": {
+  "accuracy": 0.58,
+  "n": 100
+ },
+ "he": {
+  "accuracy": 0.37,
+  "n": 100
+ },
+ "hi": {
+  "accuracy": 0.48,
+  "n": 100
+ },
+ "hu": {
+  "accuracy": 0.33,
+  "n": 100
+ },
+ "hy": {
+  "accuracy": 0.15,
+  "n": 100
+ },
+ "id": {
+  "accuracy": 0.49,
+  "n": 100
+ },
+ "is": {
+  "accuracy": 0.3,
+  "n": 100
+ },
+ "it": {
+  "accuracy": 0.48,
+  "n": 100
+ },
+ "ja": {
+  "accuracy": 0.64,
+  "n": 100
+ },
+ "jv": {
+  "accuracy": 0.26,
+  "n": 100
+ },
+ "ka": {
+  "accuracy": 0.1,
+  "n": 100
+ },
+ "km": {
+  "accuracy": 0.2,
+  "n": 100
+ },
+ "kn": {
+  "accuracy": 0.17,
+  "n": 100
+ },
+ "ko": {
+  "accuracy": 0.45,
+  "n": 100
+ },
+ "lv": {
+  "accuracy": 0.31,
+  "n": 100
+ },
+ "ml": {
+  "accuracy": 0.22,
+  "n": 100
+ },
+ "mn": {
+  "accuracy": 0.09,
+  "n": 100
+ },
+ "ms": {
+  "accuracy": 0.42,
+  "n": 100
+ },
+ "my": {
+  "accuracy": 0.13,
+  "n": 100
+ },
+ "nb": {
+  "accuracy": 0.55,
+  "n": 100
+ },
+ "nl": {
+  "accuracy": 0.43,
+  "n": 100
+ },
+ "pl": {
+  "accuracy": 0.49,
+  "n": 100
+ },
+ "pt": {
+  "accuracy": 0.46,
+  "n": 100
+ },
+ "ro": {
+  "accuracy": 0.33,
+  "n": 100
+ },
+ "ru": {
+  "accuracy": 0.56,
+  "n": 100
+ },
+ "sl": {
+  "accuracy": 0.34,
+  "n": 100
+ },
+ "sq": {
+  "accuracy": 0.26,
+  "n": 100
+ },
+ "sv": {
+  "accuracy": 0.5,
+  "n": 100
+ },
+ "sw": {
+  "accuracy": 0.22,
+  "n": 100
+ },
+ "ta": {
+  "accuracy": 0.23,
+  "n": 100
+ },
+ "te": {
+  "accuracy": 0.19,
+  "n": 100
+ },
+ "th": {
+  "accuracy": 0.48,
+  "n": 100
+ },
+ "tl": {
+  "accuracy": 0.34,
+  "n": 100
+ },
+ "tr": {
+  "accuracy": 0.39,
+  "n": 100
+ },
+ "ur": {
+  "accuracy": 0.41,
+  "n": 100
+ },
+ "vi": {
+  "accuracy": 0.28,
+  "n": 100
+ },
+ "zh-CN": {
+  "accuracy": 0.64,
+  "n": 100
+ },
+ "zh-TW": {
+  "accuracy": 0.56,
+  "n": 100
+ }
+}
