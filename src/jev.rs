@@ -74,7 +74,28 @@ pub fn question_from_jev(q: &Value) -> Option<QuestionInput> {
         ("choice", Value::Object(m)) => m.keys().cloned().collect(),
         _ => Vec::new(),
     };
-    Some(QuestionInput { qtype: idx, instructions, options: render_options(qtype, &criteria), keys })
+    // Official option_order: a permutation of range(n) placing option
+    // option_order[s] in slot s. Invalid orders are ignored (unpermute
+    // semantics: mismatched order returns the row untouched).
+    let n_options = match qtype {
+        "choice" => keys.len(),
+        "score" => criteria.as_array().map(|a| a.len()).unwrap_or(0),
+        _ => 2,
+    };
+    let option_order = q
+        .get("option_order")
+        .and_then(|v| v.as_array())
+        .and_then(|a| {
+            let order: Vec<usize> = a.iter().filter_map(|x| x.as_u64().map(|u| u as usize)).collect();
+            (order.len() == n_options
+                && {
+                    let mut sorted = order.clone();
+                    sorted.sort();
+                    sorted == (0..n_options).collect::<Vec<_>>()
+                })
+            .then_some(order)
+        });
+    Some(QuestionInput { qtype: idx, instructions, options: render_options(qtype, &criteria), keys, option_order })
 }
 
 /// A parsed request: question ids in sorted order, one input each, aligned

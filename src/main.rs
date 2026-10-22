@@ -27,6 +27,7 @@ fn demo_questions() -> Vec<QuestionInput> {
             instructions: "Which option is the largest number?".to_string(),
             options: (1..=12).map(|n| n.to_string()).collect(),
             keys: vec![],
+            option_order: None,
         },
         // obvious noul statement.
         QuestionInput {
@@ -37,6 +38,7 @@ fn demo_questions() -> Vec<QuestionInput> {
                 "true: yes, the statement holds".to_string(),
             ],
             keys: vec![],
+            option_order: None,
         },
         QuestionInput {
             qtype: 0, // choice
@@ -48,6 +50,7 @@ fn demo_questions() -> Vec<QuestionInput> {
                 "libtorch".into(),
             ],
             keys: vec![],
+            option_order: None,
         },
         QuestionInput {
             qtype: 2, // noul
@@ -57,6 +60,7 @@ fn demo_questions() -> Vec<QuestionInput> {
                 "true: yes, the statement holds".to_string(),
             ],
             keys: vec![],
+            option_order: None,
         },
         QuestionInput {
             qtype: 1, // score
@@ -69,6 +73,7 @@ fn demo_questions() -> Vec<QuestionInput> {
                 "level 4: essential".into(),
             ],
             keys: vec![],
+            option_order: None,
         },
     ]
 }
@@ -111,6 +116,17 @@ fn main() {
         Some("convert") => {
             let dir = std::env::args().nth(2).expect("usage: laya convert <dir>");
             run_convert(&dir);
+            return;
+        }
+        Some("finetune") => {
+            // usage: laya finetune <data.jsonl> [model_dir] [out_dir] [epochs]
+            let mut args = std::env::args().skip(2);
+            let data = args.next().expect("usage: laya finetune <data.jsonl> [model_dir] [out_dir] [epochs]");
+            let model = args.next().unwrap_or_else(|| "model-english".to_string());
+            let out = args.next().unwrap_or_else(|| "ft-out".to_string());
+            let epochs: usize = args.next().and_then(|e| e.parse().ok()).unwrap_or(2);
+            let micro_batch: usize = args.next().and_then(|e| e.parse().ok()).unwrap_or(0);
+            run_finetune(&data, &model, &out, epochs, micro_batch);
             return;
         }
         _ => {}
@@ -244,4 +260,23 @@ fn run_convert(dir: &str) {
         if r.round_trip_ok { "PASS" } else { "CHECK" }
     );
     assert!(r.round_trip_ok, "burnpack round-trip failed");
+}
+
+fn run_finetune(data: &str, model_dir: &str, out_dir: &str, epochs: usize, micro_batch: usize) {
+    let device = pick_device().autodiff();
+    let cfg = laya_burn::train::TrainConfig {
+        epochs,
+        micro_batch: if micro_batch > 0 { micro_batch } else { 8 },
+        ..Default::default()
+    };
+    let t0 = std::time::Instant::now();
+    let r = laya_burn::train::finetune(model_dir, data, out_dir, &cfg, &device)
+        .expect("finetune failed");
+    println!(
+        "finetune: {} items (skipped {:?}), {} calib, {} steps in {:?} \
+         loss {:.4} -> {:.4}, temperatures {:?}",
+        r.items, r.skipped, r.calibration_items, r.steps, t0.elapsed(),
+        r.first_loss, r.last_loss, r.temperatures
+    );
+    println!("checkpoint written to {}/ (servable + PyTorch-loadable)", r.out_dir);
 }

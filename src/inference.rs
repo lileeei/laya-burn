@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::calibration::Calibration;
 use crate::model::{EncoderConfig, Laya, Ropes};
 use crate::python_json::PythonJson;
-use crate::sequence::{build_sequence, Batch, Question};
+use crate::sequence::{build_sequence_ex, Batch, Question};
 use crate::tokenizer::LayaTokenizer;
 use crate::weights::Weights;
 
@@ -36,6 +36,10 @@ pub struct QuestionInput {
     /// option text. Empty for direct API use - answer_to_json then falls back
     /// to the rendered option.
     pub keys: Vec<String>,
+    /// Optional presentation permutation (official option_order):
+    /// option_order[s] is shown in slot s; answers come back in the
+    /// caller's original order.
+    pub option_order: Option<Vec<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -387,12 +391,14 @@ impl RlAgent {
     ) -> Vec<Answer> {
         let mut seqs = Vec::new();
         for (state_str, q) in rows {
-            let (ids, markers) = build_sequence(
+            let (ids, markers) = build_sequence_ex(
                 &self.tok,
                 state_str,
                 &Question { qtype: q.qtype, instructions: q.instructions.clone(), options: q.options.clone() },
                 self.max_len,
                 self.head_max_len,
+                q.option_order.as_deref(),
+                false,
             );
             seqs.push((ids, markers, q.qtype as i64));
         }
@@ -445,7 +451,8 @@ impl RlAgent {
             let act_probability = Calibration::round4(
                 Calibration::softmax(&act_rows[2 * r..2 * r + 2])[0],
             ) as f32;
-            let z: Vec<f32> = (0..k).map(|c| logits[r * n_markers + c]).collect();
+            let z_slot: Vec<f32> = (0..k).map(|c| logits[r * n_markers + c]).collect();
+            let z = crate::sequence::unpermute(&z_slot, q.option_order.as_deref());
             answers.push(answer_from_logits(&z, temp, q.qtype, act_probability));
         }
 
@@ -657,13 +664,13 @@ impl<'a> ReplayEngine<'a> {
     }
 }
 
-fn t2i(rows: Vec<Vec<i64>>, cols: usize, device: &Device) -> Tensor<2, Int> {
+pub(crate) fn t2i(rows: Vec<Vec<i64>>, cols: usize, device: &Device) -> Tensor<2, Int> {
     let n_rows = rows.len();
     let flat: Vec<i64> = rows.into_iter().flatten().collect();
     Tensor::<2, Int>::from_data(burn::tensor::TensorData::new(flat, [n_rows, cols]), device)
 }
 
-fn t1i(v: Vec<i64>, device: &Device) -> Tensor<1, Int> {
+pub(crate) fn t1i(v: Vec<i64>, device: &Device) -> Tensor<1, Int> {
     let n = v.len();
     Tensor::<1, Int>::from_data(burn::tensor::TensorData::new(v, [n]), device)
 }
@@ -710,7 +717,7 @@ mod replay_tests {
     }
 }
 
-fn collate(seqs: &[(Vec<i64>, Vec<usize>, i64)], pad: i64, batch_len: usize, n_markers: usize) -> Batch {
+pub(crate) fn collate(seqs: &[(Vec<i64>, Vec<usize>, i64)], pad: i64, batch_len: usize, n_markers: usize) -> Batch {
     let mut input_ids = Vec::new();
     let mut attention_mask = Vec::new();
     let mut marker_pos = Vec::new();

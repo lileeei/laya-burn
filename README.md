@@ -133,9 +133,23 @@ passes end to end:
   predictions. The spike's 4/6 training-batch hits is the ceiling: two rows
   are an identical-input/different-gold pair by construction.
 
-Still ahead for a full fine-tune path: dataset loading at scale, the ordinal
-RPS term, temperature refitting after training (official calibrate.py), and
-checkpoint merge with the serving stack.
+The fine-tune loop is COMPLETE (`laya finetune <data.jsonl> [model_dir]
+[out_dir] [epochs] [micro_batch]`): laya-evals JSONL in (soft targets,
+score interpolation, label smoothing), held-out calibration split,
+per-epoch option-order shuffling (opt-in), AdamW, post-training temperature
+fitting (golden-section port of fit_one_temperature), and a COMPLETE
+checkpoint directory out - servable by laya-serve and loadable by the
+PyTorch reference with strict=True. Verified end to end on
+zh_short_commands (18 labeled Chinese commands): multilingual 0.611 -> 1.0
+accuracy, ECE 0.244 -> 0.004.
+
+Known deviation: the official default loss is RLCD (policy gradient over
+Gaussian-noised logits); this port's policy-gradient term is not yet
+faithful - whole-batch ablations show its loss RISING while the CE term
+alone converges, so TrainConfig defaults to SoftCe until a gradient-parity
+harness (fixed batch, PyTorch reference gradients) pins it down. The
+official effective batch is also 64 via grad accumulation; this port steps
+per micro-batch.
 
 ## WebAssembly
 

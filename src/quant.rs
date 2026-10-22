@@ -163,6 +163,7 @@ pub fn export_q8(dir: &str, device: &Device) -> PackExport {
         instructions: "Which runtime should host the model for CPU inference in Rust?".to_string(),
         options: vec!["burn".into(), "candle".into(), "onnxruntime".into(), "libtorch".into()],
         keys: vec![],
+        option_order: None,
     };
     let state = serde_json::Value::String(
         "The user is deciding whether to run a 421M non-autoregressive decision model in Rust."

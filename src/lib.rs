@@ -12,6 +12,7 @@ pub mod quant;
 pub mod router;
 pub mod sequence;
 pub mod skeleton;
+pub mod train;
 pub mod tokenizer;
 pub mod weights;
 pub mod window_kernel;
