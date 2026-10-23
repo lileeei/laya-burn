@@ -162,8 +162,14 @@ pub fn answer_to_json(q: &QuestionInput, a: &Answer) -> Value {
         Answer::Choice { index, probabilities, confidence, act_probability } => serde_json::json!({
             "type": "choice",
             "choice": q.keys.get(*index).or_else(|| q.options.get(*index)).cloned().unwrap_or_default(),
-            "probabilities": q.options.iter().zip(probabilities.iter())
-                .map(|(o, p)| (o.clone(), serde_json::json!(p)))
+            // probability keys are the BARE criteria keys (official wire
+            // contract: rl_agent_api zips keys, not rendered options)
+            "probabilities": (0..q.options.len()).zip(probabilities.iter())
+                .map(|(i, p)| {
+                    let key = q.keys.get(i).or_else(|| q.options.get(i)).cloned()
+                        .unwrap_or_default();
+                    (key, serde_json::json!(p))
+                })
                 .collect::<serde_json::Map<String, Value>>(),
             "answer_confidence": probabilities.get(*index).copied().unwrap_or(*confidence),
             "confidence": confidence,

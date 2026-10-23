@@ -1,0 +1,47 @@
+{
+ "_meta": {
+  "date": "2026-10-23",
+  "suites": "the official research/benchmarks suites with frozen prompts + committed results",
+  "note": "every gap below was refereed with the local PyTorch reference (rl_agent_api.py on our local checkpoints): laya-burn tracks the reference in every suite, and the committed official numbers come from newer hub snapshots (laya 0.3.22-era) than the local model dirs - the same snapshot divergence documented in official issue #208 and our refreshed-sweep finding. A third wire-contract bug was found and fixed along the way (probability keys)."
+ },
+ "es_phone_turns": {
+  "ours_multilingual": {
+   "cases": 0.4224,
+   "clinic": 0.4222,
+   "frustration": 0.1111,
+   "independent": 0.3548
+  },
+  "laya_committed": {
+   "cases": 0.9018,
+   "clinic": 0.9333,
+   "frustration": 0.7778,
+   "independent": 0.871
+  },
+  "referee": "local PyTorch ref = 0.4224 on cases (IDENTICAL to laya-burn); the committed results ran model /model at laya 0.3.22 - a far stronger multilingual snapshot on short Romance-language utterances"
+ },
+ "feishu_zh": {
+  "ours_multilingual": {
+   "choice": 0.099,
+   "four_noul": 0.0938
+  },
+  "laya_v1": {
+   "choice": 0.3125,
+   "four_noul": 0.2813
+  },
+  "referee": "local PyTorch ref = 18/192 vs laya-burn 19/192 on choice (one float-noise flip) - port-faithful; the gap vs committed is snapshot divergence",
+  "found_bug": "official interpret() requires probabilities keyed by BARE criteria keys; ours were rendered option texts - fixed in jev.rs (third wire-contract bug the official suites caught)"
+ },
+ "tournament_banking77": {
+  "ours_n400": {
+   "single": 0.365,
+   "tournament_group16": 0.595
+  },
+  "laya_committed_full": {
+   "single": 0.4301,
+   "tournament": 0.6096
+  },
+  "referee": "label-id criteria order, same 100 rows: local ref 0.54 vs laya-burn 0.52 - port-faithful; the official single number sits between orderings (our app-bench with label-text order scored 0.4175 vs official 0.425)",
+  "verdict": "the tournament STRATEGY (group-elimination brackets, client-side over /v1/decide) works over laya-burn and delivers the same step-change: +23 points ours vs +18 official"
+ },
+ "idle_unload": "skipped: torch/MCP memory-unload infrastructure benchmark, not applicable to the Rust server"
+}

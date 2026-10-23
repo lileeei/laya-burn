@@ -110,6 +110,18 @@ Committed results:
   serialization on every dict-state request) - both fixed in jev.rs.
   Robustness: 16-way concurrent serving identical-answer stable, clean 400s
   on malformed requests, language routing correct.
+- `evals/official_benchmarks_results.json` — the official frozen-prompt
+  benchmark suites: es_phone_turns (Spanish phone routing), feishu_zh
+  (Chinese chat triage, choice + four-noul modes), and the banking77
+  tournament (group-elimination over high-cardinality choice, implemented
+  client-side over /v1/decide). Every gap vs the committed official
+  numbers was refereed with the local PyTorch reference: laya-burn tracks
+  it exactly (0.4224 identical, 19/192 vs 18/192, 52 vs 54/100) - the
+  official numbers come from newer hub snapshots. The suites caught a
+  THIRD wire-contract bug: probability keys must be bare criteria keys
+  (fixed in jev.rs). Tournament over laya-burn: 0.365 -> 0.595 on
+  banking77 (official 0.430 -> 0.610) - the strategy's step-change
+  reproduces.
 - `evals/sweep51_results.json` — english checkpoint forced on all 51
   languages: macro 0.2247 vs official 0.2269.
 - `evals/sweep51_routed_results.json` — AUTO routing (english for Latin,
