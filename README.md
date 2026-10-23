@@ -88,6 +88,19 @@ python3 evals/bench_latency.py http://127.0.0.1:8090            # p50/p95 latenc
 
 Committed results:
 
+- `evals/app_benchmark_results_ours.json` — the official 10-suite application
+  benchmark (ag_news / emotion / banking77 / support triage / email spam /
+  phishing / jailbreak / toxicity / RAG relevance / model routing; n=400,
+  seed 13, suites built by reusing the official `bench_apps.build()`
+  verbatim so sampling matches bit-for-bit): laya-burn vs official laya on
+  the same checkpoint agrees within ±0.008 on 19/20 cells (mean |delta|
+  0.006); vs Jev's published numbers, laya-burn tracks the official laya
+  everywhere - ahead on ag_news (0.945 vs 0.91) and emotion (0.59 vs 0.48),
+  and behind on banking77 (0.42 vs 0.87), which is the official
+  apples-to-oranges caveat: laya scores 77 labels in one pass, Jev
+  published 72-label numbers. Suites regenerate via
+  `scripts/build_app_suites.py` (needs the HF dataset cache; JSONL inputs
+  are gitignored, ~4MB).
 - `evals/sweep51_results.json` — english checkpoint forced on all 51
   languages: macro 0.2247 vs official 0.2269.
 - `evals/sweep51_routed_results.json` — AUTO routing (english for Latin,

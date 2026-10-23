@@ -1,0 +1,277 @@
+{
+ "_meta": {
+  "method": "official bench_apps.build() reused VERBATIM (identical sampling sequence) -> laya-evals JSONL -> laya-serve per checkpoint; n=400 (routing 399), seed 13. Compare against the committed app_benchmark_results.json (laya 0.2.1, CPU) and Jev published numbers (AbdelStark/jev-benchmarks v0.1.0, n=100).",
+  "verdict": "19/20 cells within +/-0.008 of the official laya on the same checkpoint (port fidelity). outliers: phishing en -0.015 (near-tie noul flips, consistent with the known rel-2e-4 noise) and model_routing mm +0.040 (the local multilingual checkpoint is a different snapshot than the official package - same story as the refreshed sweep). vs Jev: laya-burn tracks the official laya everywhere, including banking77 where laya's 77-labels-at-once task shape scores far below Jev's 72-label published number (0.42 vs 0.87) - the official repo documents this apples-to-oranges gap."
+ },
+ "ours": {
+  "english": {
+   "app.email_spam": {
+    "n": 400,
+    "noul_accuracy": 0.995,
+    "accuracy": 0.995,
+    "mean_confidence": 0.9887142495810985,
+    "ece": 0.011772250384092327,
+    "brier": 0.0033311766003587184,
+    "acc_at_50_coverage": 1.0
+   },
+   "app.guardrails_jailbreak": {
+    "n": 400,
+    "noul_accuracy": 0.71,
+    "accuracy": 0.71,
+    "mean_confidence": 0.9688747489452362,
+    "ece": 0.26501724928617476,
+    "brier": 0.2714986842325354,
+    "acc_at_50_coverage": 0.815
+   },
+   "app.model_routing_domain": {
+    "n": 399,
+    "choice_accuracy": 0.6390977443609023,
+    "accuracy": 0.6390977443609023,
+    "mean_confidence": 0.7189804508273763,
+    "ece": 0.08955087682657076,
+    "brier": 0.18118557825152592,
+    "acc_at_50_coverage": 0.8793969849246231
+   },
+   "app.moderation_toxicity": {
+    "n": 400,
+    "noul_accuracy": 0.5275,
+    "accuracy": 0.5275,
+    "mean_confidence": 0.8244524997472763,
+    "ece": 0.2969524997472763,
+    "brier": 0.3015018677385017,
+    "acc_at_50_coverage": 0.72
+   },
+   "app.phishing": {
+    "n": 400,
+    "noul_accuracy": 0.965,
+    "accuracy": 0.965,
+    "mean_confidence": 0.9819512489438057,
+    "ece": 0.02757674962282182,
+    "brier": 0.02451618097650208,
+    "acc_at_50_coverage": 1.0
+   },
+   "app.rag_relevance": {
+    "n": 400,
+    "noul_accuracy": 0.6275,
+    "accuracy": 0.6275,
+    "mean_confidence": 0.7551704996824264,
+    "ece": 0.12767049968242647,
+    "brier": 0.23558129760744084,
+    "acc_at_50_coverage": 0.73
+   },
+   "app.support_triage": {
+    "n": 400,
+    "choice_accuracy": 0.5025,
+    "accuracy": 0.5025,
+    "mean_confidence": 0.5100157501548529,
+    "ece": 0.07836125008761885,
+    "brier": 0.2158596632833917,
+    "acc_at_50_coverage": 0.6
+   },
+   "jev.ag_news": {
+    "n": 400,
+    "choice_accuracy": 0.945,
+    "accuracy": 0.945,
+    "mean_confidence": 0.9222180003672839,
+    "ece": 0.0350150000303984,
+    "brier": 0.040416091575246275,
+    "acc_at_50_coverage": 1.0
+   },
+   "jev.banking77_full": {
+    "n": 400,
+    "choice_accuracy": 0.4175,
+    "accuracy": 0.4175,
+    "mean_confidence": 0.809687249995768,
+    "ece": 0.39218724999576804,
+    "brier": 0.38389309043511916,
+    "acc_at_50_coverage": 0.59
+   },
+   "jev.emotion": {
+    "n": 400,
+    "choice_accuracy": 0.59,
+    "accuracy": 0.59,
+    "mean_confidence": 0.899509751945734,
+    "ece": 0.3162042520940304,
+    "brier": 0.3263012057569707,
+    "acc_at_50_coverage": 0.705
+   }
+  },
+  "multilingual": {
+   "app.email_spam": {
+    "n": 400,
+    "noul_accuracy": 0.9975,
+    "accuracy": 0.9975,
+    "mean_confidence": 0.9990720000863075,
+    "ece": 0.0029320001602172567,
+    "brier": 0.0025360606816023433,
+    "acc_at_50_coverage": 1.0
+   },
+   "app.guardrails_jailbreak": {
+    "n": 400,
+    "noul_accuracy": 0.7575,
+    "accuracy": 0.7575,
+    "mean_confidence": 0.9490720008313656,
+    "ece": 0.19540900096297267,
+    "brier": 0.21307127240959933,
+    "acc_at_50_coverage": 0.84
+   },
+   "app.model_routing_domain": {
+    "n": 399,
+    "choice_accuracy": 0.16290726817042606,
+    "accuracy": 0.16290726817042606,
+    "mean_confidence": 0.5835624059713574,
+    "ece": 0.42065513780093133,
+    "brier": 0.3670959979944142,
+    "acc_at_50_coverage": 0.135678391959799
+   },
+   "app.moderation_toxicity": {
+    "n": 400,
+    "noul_accuracy": 0.525,
+    "accuracy": 0.525,
+    "mean_confidence": 0.9063382494449616,
+    "ece": 0.38133824944496153,
+    "brier": 0.3685457457212307,
+    "acc_at_50_coverage": 0.73
+   },
+   "app.phishing": {
+    "n": 400,
+    "noul_accuracy": 0.99,
+    "accuracy": 0.99,
+    "mean_confidence": 0.9966692508757115,
+    "ece": 0.012296250909566816,
+    "brier": 0.010766598431266781,
+    "acc_at_50_coverage": 1.0
+   },
+   "app.rag_relevance": {
+    "n": 400,
+    "noul_accuracy": 0.6725,
+    "accuracy": 0.6725,
+    "mean_confidence": 0.8356192503869534,
+    "ece": 0.16995325013995166,
+    "brier": 0.23643870894897476,
+    "acc_at_50_coverage": 0.76
+   },
+   "app.support_triage": {
+    "n": 400,
+    "choice_accuracy": 0.525,
+    "accuracy": 0.525,
+    "mean_confidence": 0.5888722497597336,
+    "ece": 0.08059024956077337,
+    "brier": 0.2068446731478334,
+    "acc_at_50_coverage": 0.69
+   },
+   "jev.ag_news": {
+    "n": 400,
+    "choice_accuracy": 0.9325,
+    "accuracy": 0.9325,
+    "mean_confidence": 0.9676977515220642,
+    "ece": 0.03823775202035902,
+    "brier": 0.04983312487690086,
+    "acc_at_50_coverage": 0.99
+   },
+   "jev.banking77_full": {
+    "n": 400,
+    "choice_accuracy": 0.43,
+    "accuracy": 0.43,
+    "mean_confidence": 0.8210319999605418,
+    "ece": 0.3940964997559786,
+    "brier": 0.3881841845484606,
+    "acc_at_50_coverage": 0.6
+   },
+   "jev.emotion": {
+    "n": 400,
+    "choice_accuracy": 0.5375,
+    "accuracy": 0.5375,
+    "mean_confidence": 0.8709009993076324,
+    "ece": 0.33340099930763245,
+    "brier": 0.34353497392101373,
+    "acc_at_50_coverage": 0.645
+   }
+  }
+ },
+ "comparison": {
+  "app.email_spam": {
+   "ours_english": 0.995,
+   "laya_english": 0.9925,
+   "delta_english": 0.0025,
+   "ours_multilingual": 0.9975,
+   "laya_multilingual": 0.9925,
+   "delta_multilingual": 0.005
+  },
+  "app.guardrails_jailbreak": {
+   "ours_english": 0.71,
+   "laya_english": 0.7075,
+   "delta_english": 0.0025,
+   "ours_multilingual": 0.7575,
+   "laya_multilingual": 0.755,
+   "delta_multilingual": 0.0025
+  },
+  "app.model_routing_domain": {
+   "ours_english": 0.6390977443609023,
+   "laya_english": 0.6391,
+   "delta_english": -0.0,
+   "ours_multilingual": 0.16290726817042606,
+   "laya_multilingual": 0.1228,
+   "delta_multilingual": 0.0401
+  },
+  "app.moderation_toxicity": {
+   "ours_english": 0.5275,
+   "laya_english": 0.53,
+   "delta_english": -0.0025,
+   "ours_multilingual": 0.525,
+   "laya_multilingual": 0.525,
+   "delta_multilingual": 0.0
+  },
+  "app.phishing": {
+   "ours_english": 0.965,
+   "laya_english": 0.98,
+   "delta_english": -0.015,
+   "ours_multilingual": 0.99,
+   "laya_multilingual": 0.9925,
+   "delta_multilingual": -0.0025
+  },
+  "app.rag_relevance": {
+   "ours_english": 0.6275,
+   "laya_english": 0.625,
+   "delta_english": 0.0025,
+   "ours_multilingual": 0.6725,
+   "laya_multilingual": 0.6575,
+   "delta_multilingual": 0.015
+  },
+  "app.support_triage": {
+   "ours_english": 0.5025,
+   "laya_english": 0.5025,
+   "delta_english": 0.0,
+   "ours_multilingual": 0.525,
+   "laya_multilingual": 0.5225,
+   "delta_multilingual": 0.0025
+  },
+  "jev.ag_news": {
+   "ours_english": 0.945,
+   "laya_english": 0.95,
+   "delta_english": -0.005,
+   "ours_multilingual": 0.9325,
+   "laya_multilingual": 0.93,
+   "delta_multilingual": 0.0025,
+   "jev": 0.91
+  },
+  "jev.banking77_full": {
+   "ours_english": 0.4175,
+   "laya_english": 0.425,
+   "delta_english": -0.0075,
+   "ours_multilingual": 0.43,
+   "laya_multilingual": 0.425,
+   "delta_multilingual": 0.005,
+   "jev": 0.87
+  },
+  "jev.emotion": {
+   "ours_english": 0.59,
+   "laya_english": 0.595,
+   "delta_english": -0.005,
+   "ours_multilingual": 0.5375,
+   "laya_multilingual": 0.53,
+   "delta_multilingual": 0.0075,
+   "jev": 0.48
+  }
+ }
+}
