@@ -151,11 +151,15 @@ pub struct BurnpackExport {
 /// The f32 burnpack export pipeline (old LAYA_CONVERT): checkpoint ->
 /// model.mpk + complete sidecar, then a skeleton reload with NO safetensors
 /// access, answers compared on a fixed probe question.
-pub fn export_burnpack(dir: &str, device: &Device) -> BurnpackExport {
+pub fn export_burnpack(
+    dir: &str,
+    opts: &crate::options::LoadOptions,
+    device: &Device,
+) -> BurnpackExport {
     use crate::inference::{QuestionInput, RlAgent};
     use burn::module::Module;
 
-    let agent = RlAgent::load(dir, device);
+    let agent = RlAgent::load_with(dir, opts, device);
     let pack_path = format!("{dir}/model.mpk");
     agent.model.clone().save_file(&pack_path).expect("save burnpack");
     std::fs::write(

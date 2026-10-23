@@ -146,11 +146,8 @@ pub(crate) fn answer_from_logits(z: &[f32], temp: f64, qtype: usize, act_probabi
 }
 
 impl RlAgent {
-    pub fn load(model_dir: &str, device: &Device) -> Self {
-        Self::load_with(model_dir, &crate::options::LoadOptions::from_env(), device)
-    }
-
-    /// Env-free variant of [RlAgent::load] for embedders and tests.
+    /// Load a checkpoint directory (safetensors path) with EXPLICIT options -
+    /// the only constructor binary edges should call; they own from_env.
     pub fn load_with(
         model_dir: &str,
         opts: &crate::options::LoadOptions,
@@ -169,24 +166,8 @@ impl RlAgent {
     /// No-filesystem variant of [RlAgent::load] for embedders that fetch
     /// bytes (wasm): safetensors body + rl_agent_config.json +
     /// tokenizer.json + optional tokenizer_config.json bodies.
-    pub fn load_bytes(
-        weights: Vec<u8>,
-        cfg_json: &str,
-        tok_json: &str,
-        tok_cfg_json: Option<&str>,
-        device: &Device,
-    ) -> Self {
-        Self::load_bytes_with(
-            weights,
-            cfg_json,
-            tok_json,
-            tok_cfg_json,
-            &crate::options::LoadOptions::from_env(),
-            device,
-        )
-    }
-
-    /// Env-free [RlAgent::load_bytes].
+    /// Bytes form (wasm/embedders): safetensors body + config/tokenizer
+    /// bodies, EXPLICIT options.
     pub fn load_bytes_with(
         weights: Vec<u8>,
         cfg_json: &str,
@@ -255,12 +236,13 @@ impl RlAgent {
             std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer_config.json")).ok();
         let pack_bytes =
             std::fs::read(format!("{model_dir}/{pack}")).expect("read burnpack");
-        Self::load_q8_bytes(
+        Self::load_q8_bytes_with(
             pack_bytes,
             &sidecar,
             &cfg_json,
             &tok_json,
             tok_cfg.as_deref(),
+            &crate::options::LoadOptions::default(),
             device,
         )
     }
@@ -269,26 +251,8 @@ impl RlAgent {
     /// the pack body (f32 or Q8 - quantized params dequantize eagerly), the
     /// geometry sidecar, rl_agent_config.json, tokenizer.json and the
     /// optional tokenizer_config.json.
-    pub fn load_q8_bytes(
-        pack: Vec<u8>,
-        sidecar_json: &str,
-        cfg_json: &str,
-        tok_json: &str,
-        tok_cfg_json: Option<&str>,
-        device: &Device,
-    ) -> Self {
-        Self::load_q8_bytes_with(
-            pack,
-            sidecar_json,
-            cfg_json,
-            tok_json,
-            tok_cfg_json,
-            &crate::options::LoadOptions::from_env(),
-            device,
-        )
-    }
-
-    /// Env-free [RlAgent::load_q8_bytes].
+    /// Burnpack-bytes form: pack body (f32 or Q8 - quantized params
+    /// dequantize eagerly), sidecar/config/tokenizer bodies, EXPLICIT options.
     pub fn load_q8_bytes_with(
         pack: Vec<u8>,
         sidecar_json: &str,

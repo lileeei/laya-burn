@@ -21,9 +21,6 @@ pub struct BatchRequest {
 struct AppState {
     router: Mutex<Router>,
     /// Some(..) when LAYA_BATCH_MS is set: requests go through the micro-batcher.
-    /// Held for the process lifetime (the flush loop owns the receiver);
-    /// never read after construction by design.
-    #[allow(dead_code)]
     batch_tx: Option<tokio::sync::mpsc::UnboundedSender<BatchRequest>>,
 }
 
@@ -88,23 +85,41 @@ async fn decide(
         Err(msg) => return Err((StatusCode::BAD_REQUEST, msg)),
     };
 
-    // Model inference blocks the thread for ~0.1-3 s; run it on the blocking
-    // pool under the router lock to keep the async runtime healthy.
-    let st = state.clone();
-    let inputs = req.questions.clone();
-    let state_string = req.state.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
-        let r = st.router.lock().unwrap();
-        r.predict(&Value::String(state_string), &inputs)
-    })
-    .await
-    .expect("join");
+    // LAYA_BATCH_MS: hand the request to the micro-batcher (window/max
+    // flush into one router.predict_many); otherwise the direct path.
+    let outcome = if let Some(tx) = &state.batch_tx {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let state_value = Value::String(req.state.clone());
+        tx.send(BatchRequest {
+            state: state_value,
+            questions: req.questions.clone(),
+            reply: reply_tx,
+        })
+        .expect("batch channel alive");
+        reply_rx
+            .await
+            .expect("batch reply")
+            .map_err(laya_burn::router::RouterError::Load)
+    } else {
+        // Model inference blocks the thread for ~0.1-3 s; run it on the
+        // blocking pool under the router lock to keep the async runtime healthy.
+        let st = state.clone();
+        let inputs = req.questions.clone();
+        let state_string = req.state.clone();
+        tokio::task::spawn_blocking(move || {
+            let r = st.router.lock().unwrap();
+            r.predict(&Value::String(state_string), &inputs)
+        })
+        .await
+        .expect("join")
+        .map(|(route, answers)| (route.name().to_string(), answers))
+    };
 
     match outcome {
-        Ok((route, answers)) => {
+        Ok((model, answers)) => {
             let answer_map = laya_burn::jev::answers_json(&req.ids, &req.questions, &answers);
             Ok(Json(json!({
-                "model": route.name(),
+                "model": model,
                 "answers": Value::Object(answer_map),
                 "usage": {"output_tokens": 0},
             })))

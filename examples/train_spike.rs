@@ -16,7 +16,11 @@ fn main() {
     let device = Device::default().autodiff();
     println!("loading model-english on autodiff device ...");
     let t0 = std::time::Instant::now();
-    let agent = RlAgent::load("model-english", &device);
+    let agent = RlAgent::load_with(
+        "model-english",
+        &laya_burn::options::LoadOptions::default(),
+        &device,
+    );
     println!("loaded in {:?}", t0.elapsed());
 
     // A fixed micro-batch: 6 choice rows, gold indices FIXED (arbitrary) -

@@ -96,25 +96,28 @@ fn demo_state() -> serde_json::Value {
 /// LAYA_CONVERT=<dir>: checkpoint -> burn-native burnpack round trip.
 
 fn main() {
+    // THE binary edge: load-time env knobs resolve exactly once, here.
+    let load_opts = laya_burn::options::LoadOptions::from_env();
+
     // Legacy env triggers (kept for compatibility; subcommands are primary).
     if let Ok(dir) = std::env::var("LAYA_QUANT") {
         assert_ne!(dir, "1", "LAYA_QUANT=1 is a serve-side quantize-at-load knob; here LAYA_QUANT=<dir> exports a Q8 pack");
-        run_quantize(&dir);
+        run_quantize(&dir, &load_opts);
         return;
     }
     if let Ok(dir) = std::env::var("LAYA_CONVERT") {
-        run_convert(&dir);
+        run_convert(&dir, &load_opts);
         return;
     }
     match std::env::args().nth(1).as_deref() {
         Some("quantize") => {
             let dir = std::env::args().nth(2).expect("usage: laya quantize <dir>");
-            run_quantize(&dir);
+            run_quantize(&dir, &load_opts);
             return;
         }
         Some("convert") => {
             let dir = std::env::args().nth(2).expect("usage: laya convert <dir>");
-            run_convert(&dir);
+            run_convert(&dir, &load_opts);
             return;
         }
         Some("finetune") => {
@@ -125,7 +128,7 @@ fn main() {
             let out = args.next().unwrap_or_else(|| "ft-out".to_string());
             let epochs: usize = args.next().and_then(|e| e.parse().ok()).unwrap_or(2);
             let micro_batch: usize = args.next().and_then(|e| e.parse().ok()).unwrap_or(0);
-            run_finetune(&data, &model, &out, epochs, micro_batch);
+            run_finetune(&data, &model, &out, epochs, micro_batch, &load_opts);
             return;
         }
         _ => {}
@@ -141,7 +144,7 @@ fn main() {
         }
         println!("laya: no routed checkpoint directories found (model/, model-english/); falling back to the single-model path");
     }
-    run_single(&arg_dir.unwrap_or_else(|| "model".to_string()), &device);
+    run_single(&arg_dir.unwrap_or_else(|| "model".to_string()), &device, &load_opts);
 }
 
 /// Routed path: pick a checkpoint per request and report the chosen route.
@@ -180,7 +183,7 @@ fn run_routed(router: &Router, _device: &Device) {
 }
 
 /// Original single-model path, unchanged in output shape.
-fn run_single(model_dir: &str, device: &Device) {
+fn run_single(model_dir: &str, device: &Device, load_opts: &laya_burn::options::LoadOptions) {
     println!("loading laya from {model_dir} ...");
     let t0 = std::time::Instant::now();
     // LAYA_LOAD=bytes|q8 exercises the no-filesystem loaders (the wasm
@@ -191,7 +194,7 @@ fn run_single(model_dir: &str, device: &Device) {
             let cfg = std::fs::read_to_string(format!("{model_dir}/rl_agent_config.json")).unwrap();
             let tok = std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer.json")).unwrap();
             let tok_cfg = std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer_config.json")).ok();
-            RlAgent::load_bytes(weights, &cfg, &tok, tok_cfg.as_deref(), device)
+            RlAgent::load_bytes_with(weights, &cfg, &tok, tok_cfg.as_deref(), &load_opts, device)
         }
         Ok("q8") => {
             let pack = std::fs::read(format!("{model_dir}/model.q8.mpk"))
@@ -200,9 +203,9 @@ fn run_single(model_dir: &str, device: &Device) {
             let cfg = std::fs::read_to_string(format!("{model_dir}/rl_agent_config.json")).unwrap();
             let tok = std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer.json")).unwrap();
             let tok_cfg = std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer_config.json")).ok();
-            RlAgent::load_q8_bytes(pack, &sidecar, &cfg, &tok, tok_cfg.as_deref(), device)
+            RlAgent::load_q8_bytes_with(pack, &sidecar, &cfg, &tok, tok_cfg.as_deref(), &load_opts, device)
         }
-        _ => RlAgent::load(model_dir, device),
+        _ => RlAgent::load_with(model_dir, &load_opts, device),
     };
     println!("model loaded in {:.2?}", t0.elapsed());
 
@@ -236,8 +239,8 @@ fn run_single(model_dir: &str, device: &Device) {
     }
 }
 
-fn run_quantize(dir: &str) {
-    let r = laya_burn::quant::export_q8(dir, &pick_device());
+fn run_quantize(dir: &str, opts: &laya_burn::options::LoadOptions) {
+    let r = laya_burn::quant::export_q8(dir, opts, &pick_device());
     println!(
         "q8 pack: {} ({:.0} MB), quantize {} ms, reload {} ms, round-trip {}",
         r.pack_path,
@@ -249,8 +252,8 @@ fn run_quantize(dir: &str) {
     assert!(r.round_trip_ok, "Q8 round-trip failed");
 }
 
-fn run_convert(dir: &str) {
-    let r = laya_burn::export::export_burnpack(dir, &pick_device());
+fn run_convert(dir: &str, opts: &laya_burn::options::LoadOptions) {
+    let r = laya_burn::export::export_burnpack(dir, opts, &pick_device());
     println!(
         "burnpack: {} ({:.0} MB), reload {} ms, round-trip {}",
         r.pack_path,
@@ -261,7 +264,14 @@ fn run_convert(dir: &str) {
     assert!(r.round_trip_ok, "burnpack round-trip failed");
 }
 
-fn run_finetune(data: &str, model_dir: &str, out_dir: &str, epochs: usize, micro_batch: usize) {
+fn run_finetune(
+    data: &str,
+    model_dir: &str,
+    out_dir: &str,
+    epochs: usize,
+    micro_batch: usize,
+    opts: &laya_burn::options::LoadOptions,
+) {
     let device = pick_device().autodiff();
     // Env knobs live at the binary edge (the library reads none):
     // LAYA_TRAIN_LOSS=ce ablates the RLCD policy term; LAYA_TRAIN_LOG=1
@@ -279,7 +289,7 @@ fn run_finetune(data: &str, model_dir: &str, out_dir: &str, epochs: usize, micro
         ..Default::default()
     };
     let t0 = std::time::Instant::now();
-    let r = laya_burn::train::finetune(model_dir, data, out_dir, &cfg, &device)
+    let r = laya_burn::train::finetune(model_dir, data, out_dir, &cfg, opts, &device)
         .expect("finetune failed");
     println!(
         "finetune: {} items (skipped {:?}), {} calib, {} steps in {:?} \

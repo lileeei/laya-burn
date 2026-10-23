@@ -434,6 +434,7 @@ impl Router {
                 dir_if("model-multilingual/rl_agent_config.json", "model-multilingual"),
             ),
             forced,
+            crate::options::LoadOptions::from_env(),
         )
     }
 
@@ -444,6 +445,7 @@ impl Router {
         device: &Device,
         dirs: (Option<String>, Option<String>, Option<String>),
         forced: Option<Route>,
+        options: crate::options::LoadOptions,
     ) -> Self {
         let (english_dir, typed_dir, multilingual_dir) = dirs;
         Self {
@@ -454,7 +456,7 @@ impl Router {
             english: RefCell::new(None),
             typed: RefCell::new(None),
             multilingual: RefCell::new(None),
-            options: crate::options::LoadOptions::default(),
+            options,
             forced,
         }
     }
@@ -526,7 +528,7 @@ impl Router {
                 eprintln!("laya: loading {dir} from burnpack");
                 RlAgent::load_burnpack(dir, device)
             }
-            PackChoice::Safetensors | PackChoice::Auto => RlAgent::load(dir, device),
+            PackChoice::Safetensors | PackChoice::Auto => RlAgent::load_with(dir, &self.options, device),
         };
         if self.options.quant_at_load {
             let t0 = std::time::Instant::now();
@@ -720,7 +722,7 @@ mod with_dirs_tests {
     /// error - constructible without CWD probing or env vars.
     #[test]
     fn predict_without_dirs_returns_load_error() {
-        let router = Router::with_dirs(&Device::default(), (None, None, None), None);
+        let router = Router::with_dirs(&Device::default(), (None, None, None), None, Default::default());
         let err = router
             .predict(&json!({"utterance": "用户想查天气"}), &[])
             .expect_err("no dirs configured");
@@ -734,6 +736,7 @@ mod with_dirs_tests {
             &Device::default(),
             (None, None, None),
             Some(Route::Multilingual),
+            Default::default(),
         );
         let (route, _) = router.route(&json!("english text entirely"));
         assert_eq!(route, Route::Multilingual);

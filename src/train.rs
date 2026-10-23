@@ -328,9 +328,10 @@ pub fn finetune(
     data_jsonl: &str,
     out_dir: &str,
     cfg: &TrainConfig,
+    opts: &crate::options::LoadOptions,
     device: &Device,
 ) -> Result<TrainReport, String> {
-    let agent = RlAgent::load(model_dir, device);
+    let agent = RlAgent::load_with(model_dir, opts, device);
     let (all, skipped) = items_from_jsonl(&agent, data_jsonl)?;
     if all.is_empty() {
         return Err(format!("no training items (skipped: {skipped:?})"));

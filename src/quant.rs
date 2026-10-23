@@ -149,11 +149,15 @@ pub struct PackExport {
 /// quantize with the exempted group, write model.q8.mpk plus a complete
 /// sidecar, reload through the eager-dequant path, verify bit-identical
 /// answers on a fixed probe question.
-pub fn export_q8(dir: &str, device: &Device) -> PackExport {
+pub fn export_q8(
+    dir: &str,
+    opts: &crate::options::LoadOptions,
+    device: &Device,
+) -> PackExport {
     use crate::inference::{QuestionInput, RlAgent};
     use burn::module::Module;
 
-    let agent = RlAgent::load(dir, device);
+    let agent = RlAgent::load_with(dir, opts, device);
     let t0 = std::time::Instant::now();
     let q_model = quantize(agent.model.clone(), device);
     let quantize_ms = t0.elapsed().as_millis();
@@ -169,7 +173,7 @@ pub fn export_q8(dir: &str, device: &Device) -> PackExport {
         "The user is deciding whether to run a 421M non-autoregressive decision model in Rust."
             .to_string(),
     );
-    let mut q_agent = RlAgent::load(dir, device);
+    let mut q_agent = RlAgent::load_with(dir, opts, device);
     q_agent.model = q_model;
     let in_memory = q_agent.system_one(device, &state, &[probe.clone()], None);
 
@@ -215,7 +219,7 @@ mod export_tests {
             }
         }
         let device = burn::tensor::Device::default();
-        let report = super::export_q8(dir, &device);
+        let report = super::export_q8(dir, &crate::options::LoadOptions::default(), &device);
         assert!(report.pack_bytes > 300_000_000, "pack suspiciously small");
         assert!(report.round_trip_ok, "eager-dequant reload != in-memory Q8");
     }
