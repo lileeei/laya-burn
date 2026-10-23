@@ -14,3 +14,4 @@ wasm/pkg
 ft-*/
 tests/fixtures/grad_parity/rust_*
 evals/app_suites/
+hub-new/

@@ -1,47 +1,39 @@
 {
  "_meta": {
   "date": "2026-10-23",
-  "suites": "the official research/benchmarks suites with frozen prompts + committed results",
-  "note": "every gap below was refereed with the local PyTorch reference (rl_agent_api.py on our local checkpoints): laya-burn tracks the reference in every suite, and the committed official numbers come from newer hub snapshots (laya 0.3.22-era) than the local model dirs - the same snapshot divergence documented in official issue #208 and our refreshed-sweep finding. A third wire-contract bug was found and fixed along the way (probability keys)."
+  "correction": "The earlier 'snapshot divergence' attribution was WRONG in mechanism. Hash verification (three tensors + config, across our local copy, the CURRENT hub revision, and the feishu-recorded revision 1c5edc17) proves the multilingual weights NEVER changed. The committed official gaps decompose into two documented causes below.",
+  "evidence": "hub sha 7b928d82 (now) vs feishu-recorded 1c5edc17: different revisions, identical weights (embedding/Layer0-Wqkv/head/temperature hashes all match our local copy)."
  },
  "es_phone_turns": {
-  "ours_multilingual": {
+  "ours_zero_shot": {
    "cases": 0.4224,
    "clinic": 0.4222,
    "frustration": 0.1111,
    "independent": 0.3548
   },
-  "laya_committed": {
-   "cases": 0.9018,
-   "clinic": 0.9333,
-   "frustration": 0.7778,
-   "independent": 0.871
+  "official_README_zero_shot_row": {
+   "cases": 0.384,
+   "clinic": 0.489,
+   "frustration": 0.0,
+   "independent": 0.419,
+   "pooled": 0.396
   },
-  "referee": "local PyTorch ref = 0.4224 on cases (IDENTICAL to laya-burn); the committed results ran model /model at laya 0.3.22 - a far stronger multilingual snapshot on short Romance-language utterances"
+  "committed_results": "0.90+ = the benchmark's own FINE-TUNED model (their v5 recipe, docker /model); README documents base zero-shot at 0.396 pooled",
+  "verdict": "CLOSED: our numbers reproduce the documented zero-shot row (within version noise); the 0.90 rows are fine-tuned, by design"
  },
  "feishu_zh": {
-  "ours_multilingual": {
+  "ours": {
    "choice": 0.099,
    "four_noul": 0.0938
   },
-  "laya_v1": {
+  "committed": {
    "choice": 0.3125,
    "four_noul": 0.2813
   },
-  "referee": "local PyTorch ref = 18/192 vs laya-burn 19/192 on choice (one float-noise flip) - port-faithful; the gap vs committed is snapshot divergence",
-  "found_bug": "official interpret() requires probabilities keyed by BARE criteria keys; ours were rendered option texts - fixed in jev.rs (third wire-contract bug the official suites caught)"
+  "referee_today": "SDK 0.4.12 (released) on the SAME weights: choice 20/192 = 0.1042 ~= laya-burn 19/192 ~= checkpoint-era ref 18/192 - three independent implementations agree on current code",
+  "cause": "the committed run used laya at unreleased commit ef7d7d26 (laya_source_commit in metadata.json); that object exists in no tag or clone available here. Behavior drift between that commit and any released version - upstream, not a port defect",
+  "verdict": "CLOSED as upstream version drift; no laya-burn action possible without that commit"
  },
- "tournament_banking77": {
-  "ours_n400": {
-   "single": 0.365,
-   "tournament_group16": 0.595
-  },
-  "laya_committed_full": {
-   "single": 0.4301,
-   "tournament": 0.6096
-  },
-  "referee": "label-id criteria order, same 100 rows: local ref 0.54 vs laya-burn 0.52 - port-faithful; the official single number sits between orderings (our app-bench with label-text order scored 0.4175 vs official 0.425)",
-  "verdict": "the tournament STRATEGY (group-elimination brackets, client-side over /v1/decide) works over laya-burn and delivers the same step-change: +23 points ours vs +18 official"
- },
- "idle_unload": "skipped: torch/MCP memory-unload infrastructure benchmark, not applicable to the Rust server"
+ "multilingual_massive_refresh_note": "the 0.3692-vs-0.4008 refreshed-sweep gap follows the same pattern: freshly run at laya 0.3.7/0.3.20 per its provenance, on identical weights - SDK-version drift, not weights",
+ "downloads": "hub-new/multilingual/ fetched via hf-mirror (weights bit-identical to local model-multilingual); no newer checkpoint exists to gain from - the 'download new hub snapshot' follow-up resolves to: nothing to download"
 }
