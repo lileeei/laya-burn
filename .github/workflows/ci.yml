@@ -15,6 +15,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: unit tests
         run: cargo test --release --locked
+      - name: warnings gate
+        run: cargo build --release --locked --examples --tests 2>&1 | tee /tmp/build.log; ! grep -q "^warning" /tmp/build.log
+        shell: bash
       - name: wasm32 gate (lib, no serve)
         run: cargo build --release --locked --target wasm32-unknown-unknown -p laya-burn --lib --no-default-features
       - name: wasm32 gate (runtime surface)

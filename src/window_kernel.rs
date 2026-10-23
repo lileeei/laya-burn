@@ -22,6 +22,10 @@
 //! cube parallelism rather than K/V bandwidth, and R sets of softmax state add
 //! register pressure - so the simpler v1 stays the default. Set LAYA_KERNEL=v2
 //! to select v2.
+// Historical note (from the deleted examples/kernel_spike.rs probe): custom
+// cubecl kernels plug in via burn-backend-extension (`BackendExtension`),
+// with `Kernel` impls launched through `cubecl::launch`. The differential
+// test in tests/gpu_kernel_test.rs is the live harness for this kernel.
 
 use burn::{
     backend::{Dispatch, backend_extension, tensor::FloatTensor},
@@ -107,13 +111,13 @@ mod kernel {
         let mask_base = b * s;
 
         let scale = F::new(1.0 / (HEAD_DIM as f32).sqrt());
-        let neg_inf = F::new(-1.0e9);
+        let neg_inf = F::new(-1.0e9_f32);
 
         // Online softmax state (per unit; scalars identical across units).
-        let mut m = F::new(-3.0e38);
-        let mut l = F::new(0.0);
-        let mut acc0 = F::new(0.0);
-        let mut acc1 = F::new(0.0);
+        let mut m = F::new(-3.0e38_f32);
+        let mut l = F::new(0.0_f32);
+        let mut acc0 = F::new(0.0_f32);
+        let mut acc1 = F::new(0.0_f32);
 
         let j_lo = i.saturating_sub(WINDOW);
         let j_hi = (i + WINDOW + 1).min(s);
@@ -125,7 +129,7 @@ mod kernel {
             let dot = plane_sum(partial);
             let keep = pad_mask[mask_base + j];
             // keep=1 (real) adds 0; keep=0 (pad) adds -1e9.
-            let s = dot * scale + (F::new(1.0) - keep) * neg_inf;
+            let s = dot * scale + (F::new(1.0_f32) - keep) * neg_inf;
 
             let m_new = m.max(s);
             let alpha = (m - m_new).exp();
@@ -166,7 +170,7 @@ mod kernel {
         }
 
         let scale = F::new(1.0 / (HEAD_DIM as f32).sqrt());
-        let neg_inf = F::new(-1.0e9);
+        let neg_inf = F::new(-1.0e9_f32);
 
         // Per-row state in registers: query components plus online-softmax
         // accumulators. Rows are indexed by compile-time-unrolled loops, so
@@ -185,13 +189,13 @@ mod kernel {
                 q0[r] = query[q_row + u];
                 q1[r] = query[q_row + u + PLANE];
             } else {
-                q0[r] = F::new(0.0);
-                q1[r] = F::new(0.0);
+                q0[r] = F::new(0.0_f32);
+                q1[r] = F::new(0.0_f32);
             }
-            m[r] = F::new(-3.0e38);
-            l[r] = F::new(0.0);
-            acc0[r] = F::new(0.0);
-            acc1[r] = F::new(0.0);
+            m[r] = F::new(-3.0e38_f32);
+            l[r] = F::new(0.0_f32);
+            acc0[r] = F::new(0.0_f32);
+            acc1[r] = F::new(0.0_f32);
         }
 
         // Union window of the whole row block: read each K/V element once.
@@ -206,7 +210,7 @@ mod kernel {
             let v0 = value[kv_base + u];
             let v1 = value[kv_base + u + PLANE];
             let keep = pad_mask[b * s + j];
-            let pad_add = (F::new(1.0) - keep) * neg_inf;
+            let pad_add = (F::new(1.0_f32) - keep) * neg_inf;
 
             for r in 0..ROWS_PER_CUBE {
                 let i = i_base + r;

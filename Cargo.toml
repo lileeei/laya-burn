@@ -37,3 +37,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [profile.release]
 opt-level = 3
+
+[lints.rust]
+unused = "warn"
+dead_code = "warn"

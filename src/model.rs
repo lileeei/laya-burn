@@ -6,11 +6,10 @@ use burn::nn::{Embedding, LayerNorm, LayerNormConfig, Linear};
 use burn::tensor::activation::{gelu, relu, softmax};
 use burn::tensor::{Bool, Device, FloatDType, Int, Tensor, module};
 
-use crate::weights::{Weights, compute_dtype};
+use crate::weights::compute_dtype;
 
 /// Write a float tensor as little-endian f32 with a .shape sidecar when LAYA_DUMP_DIR is set.
-pub fn dump_tensor<const D: usize>(name: &str, t: &Tensor<D>) {
-    let Ok(dir) = std::env::var("LAYA_DUMP_DIR") else { return };
+pub fn dump_tensor<const D: usize>(dir: &str, name: &str, t: &Tensor<D>) {
     let _ = std::fs::create_dir_all(&dir);
     let vals = t.to_data().as_slice::<f32>().unwrap_or(&[]).to_vec();
     let mut bytes = Vec::with_capacity(vals.len() * 4);
@@ -22,8 +21,7 @@ pub fn dump_tensor<const D: usize>(name: &str, t: &Tensor<D>) {
 }
 
 /// Write an int tensor as text lines when LAYA_DUMP_DIR is set.
-pub fn dump_ids<const D: usize>(name: &str, t: &Tensor<D, Int>) {
-    let Ok(dir) = std::env::var("LAYA_DUMP_DIR") else { return };
+pub fn dump_ids<const D: usize>(dir: &str, name: &str, t: &Tensor<D, Int>) {
     let _ = std::fs::create_dir_all(&dir);
     let text = match t.to_data().as_slice::<i64>() {
         Ok(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","),
@@ -431,7 +429,6 @@ fn attention_blocked(
 enum AttnMask {
     Manual(Tensor<4>),      // additive float mask (fallback comparison path)
     Bool(Tensor<4, Bool>),  // boolean mask for the fused module::attention kernel
-    None,
 }
 
 fn attention(
@@ -440,14 +437,14 @@ fn attention(
     v: Tensor<4>,
     n_heads: usize,
     mask: &AttnMask,
+    mode: crate::options::AttentionMode,
 ) -> Tensor<3> {
     let [batch, _h, seq, _d] = q.dims();
     let head_dim = q.dims()[3];
-    if std::env::var("LAYA_ATTN").as_deref() != Ok("manual") {
+    if mode != crate::options::AttentionMode::Manual {
         let (m, bias) = match mask {
             AttnMask::Bool(b) => (Some(b.clone()), None),
             AttnMask::Manual(add) => (None, Some(add.clone())), // additive as bias: same softmax result
-            AttnMask::None => (None, None),
         };
         let out = module::attention(
             q.clone(),
@@ -462,10 +459,6 @@ fn attention(
     let add = match mask {
         AttnMask::Manual(add) => add.clone(),
         AttnMask::Bool(_) => panic!("bool mask on manual attention path"),
-        AttnMask::None => {
-            let z = Tensor::<1>::from_floats([0.0], &q.device());
-            z.reshape([1, 1, 1, 1]).repeat_dim(2, seq).repeat_dim(3, seq)
-        }
     };
     let scores = q.matmul(k.transpose()) / (head_dim as f32).sqrt() + add;
     softmax(scores, 3)
@@ -570,6 +563,7 @@ impl Laya {
         marker_mask: Tensor<2, Int>,
         qtype: Tensor<1, Int>,
         ropes: &Ropes,
+        fopts: &crate::options::ForwardOptions,
     ) -> (Tensor<2>, Tensor<2>) {
         let device = input_ids.device();
         let [batch, seq] = input_ids.dims();
@@ -586,7 +580,7 @@ impl Laya {
             (m - 1.0) * 1.0e9
         };
 
-        let use_manual = std::env::var("LAYA_ATTN").as_deref() == Ok("manual");
+        let use_manual = fopts.attention == crate::options::AttentionMode::Manual;
         let pad_bool = attention_mask.clone().equal_scalar(0).reshape([batch, 1, 1, seq]);
 
         // Masks are identical for every layer of one batch: build once, reuse
@@ -614,14 +608,12 @@ impl Laya {
 
         // ---- encoder ----
         let mut h = self.emb_norm.forward(self.tok_embeddings.forward(input_ids.clone()));
-        dump_tensor("emb_out", &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
-        dump_ids("input_ids", &input_ids.clone().slice([0..1, 0..seq]));
-        // Env knobs resolved ONCE per forward (they used to be read inside the
-        // layer loop - which also placed them inside captured replay closures).
-        let interleaved = std::env::var("LAYA_ROPE").as_deref() == Ok("interleaved");
-        let attn_mode: String = std::env::var("LAYA_ATTN").unwrap_or_default();
-        for (li, layer) in self.layers.iter().enumerate() {
-            let _ = li;
+        if let Some(dir) = &fopts.dump_dir {
+            dump_tensor(dir, "emb_out", &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
+            dump_ids(dir, "input_ids", &input_ids.clone().slice([0..1, 0..seq]));
+        }
+        let interleaved = fopts.rope_interleaved;
+        for (_li, layer) in self.layers.iter().enumerate() {
             let x1 = match &layer.attn_norm {
                 Some(n) => n.forward(h.clone()),
                 None => h.clone(),
@@ -633,11 +625,6 @@ impl Laya {
             } else {
                 (rope.forward(q), rope.forward(k))
             };
-            if li == 0 {
-                {
-            }
-            }
-
             let amask = if use_manual {
                 let mut mask = pad_add.clone();
                 if !layer.is_global {
@@ -649,18 +636,17 @@ impl Laya {
             } else {
                 AttnMask::Bool(pad_bool.clone())
             };
-            let attn_mode = &attn_mode;
-            let use_blocks = attn_mode == "blocks" && !layer.is_global;
-            let use_kernel = attn_mode == "kernel"
-                && !layer.is_global
-                && crate::weights::compute_dtype() == burn::tensor::FloatDType::F32;
+            let use_blocks = fopts.attention == crate::options::AttentionMode::Blocks
+                && !layer.is_global;
+            let use_kernel = fopts.attention == crate::options::AttentionMode::Kernel
+                && !layer.is_global;
             let attn_res = if use_kernel {
                 let pad_f = attention_mask.clone().float().reshape([batch, seq]);
                 crate::window_kernel::windowed_attention(q, k, v, pad_f).swap_dims(1, 2).reshape([batch, seq, d])
             } else if use_blocks {
                 attention_blocked(q, k, v, &attention_mask, self.window_size / 2, &device)
             } else {
-                attention(q, k, v, n_heads, &amask)
+                attention(q, k, v, n_heads, &amask, fopts.attention)
             };
             let attn_mod_out = layer.attn_out.forward(attn_res);
             let h2 = h + attn_mod_out;
@@ -673,18 +659,20 @@ impl Laya {
             let i_dim = wi.dims()[2] / 2;
             let a = wi.clone().slice([0..batch, 0..seq, 0..i_dim]);
             let b = wi.slice([0..batch, 0..seq, i_dim..2 * i_dim]);
-            let mlp = if std::env::var("LAYA_MLP").as_deref() == Ok("swap") {
+            let mlp = if fopts.mlp_swap {
                 a * gelu(b)
             } else {
                 gelu(a) * b
             };
             h = h2 + layer.mlp_out.forward(mlp);
-            if li == 0 || li == 1 || li == self.layers.len() - 1 {
-                dump_tensor(&format!("enc_layer_{li}"), &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
+            if (_li == 0 || _li == 1 || _li == self.layers.len() - 1) && let Some(dir) = &fopts.dump_dir {
+                dump_tensor(dir, &format!("enc_layer_{_li}"), &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
             }
         }
         let mut h = self.final_norm.forward(h);
-        dump_tensor("encoder_out", &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
+        if let Some(dir) = &fopts.dump_dir {
+            dump_tensor(dir, "encoder_out", &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
+        }
 
         // ---- typed decision head ----
         h = h + self
@@ -708,12 +696,13 @@ impl Laya {
             } else {
                 AttnMask::Bool(pad_bool3.clone())
             };
-            let h2 = h + hl.out_proj.forward(attention(q, k, v, n_heads, &amask3));
+            let h2 = h + hl.out_proj.forward(attention(q, k, v, n_heads, &amask3, fopts.attention));
             h = h2.clone() + hl.linear2.forward(relu(hl.linear1.forward(hl.norm2.forward(h2))));
         }
 
-        dump_tensor("head_out", &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
-
+        if let Some(dir) = &fopts.dump_dir {
+            dump_tensor(dir, "head_out", &h.clone().slice([0..1, 0..seq, 0..d]).reshape([seq, d]));
+        }
         // gather marker positions -> [B,M,d]
         let n_markers = marker_pos.dims()[1];
         let idx = marker_pos
@@ -736,12 +725,12 @@ impl Laya {
             .act_fc2
             .forward(gelu(self.act_fc1.forward(Tensor::cat(vec![pooled, feats], 1))));
 
-        let mut lg = logits.clone().slice([0..1, 0..n_markers]).reshape([1, n_markers]);
-        dump_tensor("logits", &lg.clone());
-        lg = lg.slice([0..1, 0..n_markers]).reshape([1, n_markers]);
-        let _ = lg;
-        let ag = act_logits.clone().slice([0..1, 0..2]);
-        dump_tensor("act_logits", &ag);
+        if let Some(dir) = &fopts.dump_dir {
+            let lg = logits.clone().slice([0..1, 0..n_markers]).reshape([1, n_markers]);
+            dump_tensor(dir, "logits", &lg);
+            let ag = act_logits.clone().slice([0..1, 0..2]);
+            dump_tensor(dir, "act_logits", &ag);
+        }
 
         let logits = logits.cast(FloatDType::F32);
         let act_logits = act_logits.cast(FloatDType::F32);

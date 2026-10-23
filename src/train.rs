@@ -16,7 +16,7 @@ use burn::tensor::{Device, Tensor};
 use serde_json::Value;
 
 use crate::inference::RlAgent;
-use crate::sequence::{build_sequence_ex, unpermute, Question, QTYPES};
+use crate::sequence::{build_sequence_ex, Question, QTYPES};
 
 /// Training knobs (official TrainConfig defaults where they apply to the
 /// single-device reduction). `lr` is a single rate - the official splits
@@ -431,7 +431,7 @@ pub fn finetune(
             }
             let b = crate::inference::collate_batch(&seqs, agent.tok.pad_token_id, device);
             let n_markers = b.marker_pos.dims()[1];
-            let (logits, _act) = crate::inference::forward_batch(&model, &agent.ropes, &b);
+            let (logits, _act) = crate::inference::forward_batch(&model, &agent.ropes, &b, &agent.fopts);
             // target/mask padded to n_markers columns
             let rows = seqs.len();
             let mut t_flat = vec![0.0f32; rows * n_markers];
@@ -490,7 +490,7 @@ pub fn finetune(
             .collect();
         let n_markers = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
         let b = crate::inference::collate_batch(&seqs, agent.tok.pad_token_id, device);
-        let (logits, _act) = crate::inference::forward_batch(&model, &agent.ropes, &b);
+        let (logits, _act) = crate::inference::forward_batch(&model, &agent.ropes, &b, &agent.fopts);
         let logits = logits.detach().into_data();
         let vals = logits.as_slice::<f32>().map_err(|e| format!("{e:?}"))?;
         for (r, row) in chunk.iter().enumerate() {
@@ -603,7 +603,7 @@ pub fn rlcd_core(
 ) -> Tensor<1> {
     let rows = logits.dims()[0];
     let cols = logits.dims()[1];
-    let mut total = soft_ce(logits, target, mask);
+    let total = soft_ce(logits, target, mask);
     if samples == 0 || sigma <= 0.0 {
         return total;
     }

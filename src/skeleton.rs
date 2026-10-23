@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use burn::tensor::{Device, FloatDType, Tensor, TensorData};
+use burn::tensor::{Device, Tensor, TensorData};
 
 use crate::weights::WeightSource;
 
@@ -61,7 +61,6 @@ impl SkeletonSpec {
     /// 10_000 because every checkpoint was trained that way (verified by
     /// parity - see inference.rs), whatever its encoder config claims.
     pub fn from_model(model: &crate::model::Laya) -> Self {
-        use burn::module::Module;
         let (vocab, hidden) = {
             let d = model.tok_embeddings.weight.val().dims();
             (d[0], d[1])

@@ -17,8 +17,10 @@ pub struct RlAgent {
     pub tok: LayaTokenizer,
     pub max_len: usize,
     pub head_max_len: usize,
-    /// Parity dump dir, resolved once at load (old LAYA_DUMP_DIR).
-    pub dump_dir: Option<String>,
+    /// Forward-time behaviour (attention mode, rope/mlp experiments,
+    /// forward dtype), resolved once at load; dump_dir rides in from
+    /// LoadOptions so one env var drives every dump site.
+    pub fopts: crate::options::ForwardOptions,
     pub temperature: [f64; 3],
     pub temperature_by_options: Vec<(String, f64)>,
     /// Buckets whose fitted temperature was clamped to [0.5, 5.0] at load.
@@ -177,10 +179,7 @@ impl RlAgent {
         let tok_json =
             std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer.json")).unwrap();
         let tok_cfg = std::fs::read_to_string(format!("{model_dir}/tokenizer/tokenizer_config.json")).ok();
-        let mut agent =
-            Self::load_bytes_with(weights, &cfg_json, &tok_json, tok_cfg.as_deref(), opts, device);
-        agent.dump_dir = opts.dump_dir.clone();
-        agent
+        Self::load_bytes_with(weights, &cfg_json, &tok_json, tok_cfg.as_deref(), opts, device)
     }
 
     /// No-filesystem variant of [RlAgent::load] for embedders that fetch
@@ -243,7 +242,9 @@ impl RlAgent {
         let tok = LayaTokenizer::from_json(tok_json, tok_cfg_json);
         let max_len = cfg["max_len"].as_u64().unwrap() as usize;
         let head_max_len = cfg["head_max_len"].as_u64().unwrap() as usize;
-        Self { model, ropes, tok, max_len, head_max_len, dump_dir: opts.dump_dir.clone(), temperature, temperature_by_options, clamped_temperatures }
+        let mut fopts = crate::options::ForwardOptions::from_env();
+        fopts.dump_dir = opts.dump_dir.clone();
+        Self { model, ropes, tok, max_len, head_max_len, fopts, temperature, temperature_by_options, clamped_temperatures }
     }
 
     /// Load from a burnpack export (model.mpk + model.mpk.json sidecar) with
@@ -406,7 +407,7 @@ impl RlAgent {
         let n_markers: usize = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
         let b = collate_batch(&seqs, self.tok.pad_token_id, device);
 
-        if let Some(dir) = &self.dump_dir {
+        if let Some(dir) = &self.fopts.dump_dir {
             let _ = std::fs::create_dir_all(&dir);
             let ids = b.input_ids.clone().into_data();
             let rows: Vec<String> = ids
@@ -421,7 +422,7 @@ impl RlAgent {
         // cache; when unset (replay == None) the direct path runs.
         let key: ShapeKey = (seqs.len(), batch_len, n_markers);
         let (logits, act_logits) = match replay {
-            None => forward_batch(&self.model, &self.ropes, &b),
+            None => forward_batch(&self.model, &self.ropes, &b, &self.fopts),
             Some(engine) => engine.run(key, || StableInputs {
                 input_ids: b.input_ids.clone(),
                 attention_mask: b.attention_mask.clone(),
@@ -476,6 +477,7 @@ pub struct ReplayEngine<'a> {
     /// rejected inside a hardware capture window); further calls then use the
     /// direct forward so results stay correct.
     capture_disabled: bool,
+    fopts: crate::options::ForwardOptions,
 }
 
 /// The stable inputs shared between the engine (which refreshes them) and the
@@ -527,6 +529,7 @@ impl<'a> ReplayEngine<'a> {
             ropes: &agent.ropes,
             entries: HashMap::new(),
             capture_disabled: false,
+            fopts: agent.fopts.clone(),
         }
     }
 
@@ -538,6 +541,7 @@ impl<'a> ReplayEngine<'a> {
             inputs.marker_mask.clone(),
             inputs.qtype.clone(),
             self.ropes,
+            &self.fopts,
         )
     }
 
@@ -607,6 +611,7 @@ impl<'a> ReplayEngine<'a> {
                 Tensor::<1>::from_floats([0.0f32], &self.device).reshape([1, 1]),
                 Tensor::<1>::from_floats([0.0f32], &self.device).reshape([1, 1]),
             );
+            let fopts = self.fopts.clone();
             let closure: Box<dyn FnMut() -> ForwardOutput + 'a> = Box::new(move || {
                 let inputs = slot.borrow().clone();
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -617,6 +622,7 @@ impl<'a> ReplayEngine<'a> {
                         inputs.marker_mask,
                         inputs.qtype,
                         ropes,
+                        &fopts,
                     )
                 }));
                 match attempt {
@@ -691,7 +697,12 @@ pub fn collate_batch(
 /// The single batched forward. Takes `&Laya` (not an agent) so training can
 /// pass its RequireGrad-mapped clone and calibration its stepped model -
 /// one forward site, three callers.
-pub fn forward_batch(model: &Laya, ropes: &Ropes, batch: &DeviceBatch) -> (Tensor<2>, Tensor<2>) {
+pub fn forward_batch(
+    model: &Laya,
+    ropes: &Ropes,
+    batch: &DeviceBatch,
+    fopts: &crate::options::ForwardOptions,
+) -> (Tensor<2>, Tensor<2>) {
     model.forward(
         batch.input_ids.clone(),
         batch.attention_mask.clone(),
@@ -699,6 +710,7 @@ pub fn forward_batch(model: &Laya, ropes: &Ropes, batch: &DeviceBatch) -> (Tenso
         batch.marker_mask.clone(),
         batch.qtype.clone(),
         ropes,
+        fopts,
     )
 }
 

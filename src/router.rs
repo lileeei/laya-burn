@@ -592,8 +592,6 @@ impl Router {
         &self,
         items: &[(Value, Vec<QuestionInput>)],
     ) -> Vec<Result<(Route, Vec<Answer>), RouterError>> {
-        use std::cell::RefCell;
-
         // Group item indices by detected route (forced route overrides).
         let mut groups: Vec<(Route, Vec<usize>)> = Vec::new();
         let mut routed: Vec<Result<Route, RouterError>> = Vec::with_capacity(items.len());

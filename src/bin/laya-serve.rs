@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use axum::{Json, Router as AxumRouter, extract::State, http::StatusCode, routing::{get, post}};
 use laya_burn::inference::QuestionInput;
-use laya_burn::router::{Route, Router};
+use laya_burn::router::Router;
 use serde_json::{Value, json};
 
 pub struct BatchRequest {
@@ -21,6 +21,9 @@ pub struct BatchRequest {
 struct AppState {
     router: Mutex<Router>,
     /// Some(..) when LAYA_BATCH_MS is set: requests go through the micro-batcher.
+    /// Held for the process lifetime (the flush loop owns the receiver);
+    /// never read after construction by design.
+    #[allow(dead_code)]
     batch_tx: Option<tokio::sync::mpsc::UnboundedSender<BatchRequest>>,
 }
 
@@ -70,7 +73,7 @@ async fn health() -> Json<Value> {
 }
 
 async fn models(State(state): State<std::sync::Arc<AppState>>) -> Json<Value> {
-    let r = state.router.lock().unwrap();
+    let _r = state.router.lock().unwrap();
     Json(json!({
         "routes": ["english", "typed-decisions", "multilingual"],
     }))

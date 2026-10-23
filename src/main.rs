@@ -94,7 +94,6 @@ fn demo_state() -> serde_json::Value {
 }
 
 /// LAYA_CONVERT=<dir>: checkpoint -> burn-native burnpack round trip.
-use burn::module::Module;
 
 fn main() {
     // Legacy env triggers (kept for compatibility; subcommands are primary).

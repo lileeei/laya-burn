@@ -4,10 +4,10 @@
 //!
 //! Run: cargo run --release --example train_spike
 
-use burn::module::{Module, ModuleMapper, Param};
+use burn::module::Module;
 use burn::optim::{AdamWConfig, GradientsParams, ModuleOptimizer};
 
-use burn::tensor::{Device, Int, Tensor};
+use burn::tensor::{Device, Tensor};
 
 use laya_burn::inference::RlAgent;
 use laya_burn::sequence::{build_sequence, Question, QTYPES};
@@ -58,7 +58,7 @@ fn main() {
     for step in 0..=60 {
         let b = laya_burn::inference::collate_batch(&seqs, pad, &device);
         let n_markers = b.marker_pos.dims()[1];
-        let (logits, _act) = laya_burn::inference::forward_batch(&model, &agent.ropes, &b);
+        let (logits, _act) = laya_burn::inference::forward_batch(&model, &agent.ropes, &b, &agent.fopts);
         let rows = gold.len();
         let mut t_flat = vec![0.0f32; rows * n_markers];
         let mut m_flat = vec![0.0f32; rows * n_markers];
@@ -109,7 +109,7 @@ fn main() {
     // re-evaluate final loss after the last step
     let b = laya_burn::inference::collate_batch(&seqs, pad, &device);
     let n_markers = b.marker_pos.dims()[1];
-    let (logits, _) = laya_burn::inference::forward_batch(&model, &agent.ropes, &b);
+    let (logits, _) = laya_burn::inference::forward_batch(&model, &agent.ropes, &b, &agent.fopts);
     // final loss on the shared path (approximate: identity target rebuilt)
     let rows = gold.len();
     let mut t_flat = vec![0.0f32; rows * n_markers];
