@@ -39,6 +39,8 @@ pub struct TrainConfig {
     /// (official default: none - position-balanced training is opt-in).
     pub shuffle_types: Vec<String>,
     pub label_smoothing: f32,
+    /// Print per-step losses to stderr (set by the CLI's LAYA_TRAIN_LOG).
+    pub log: bool,
     pub calib_max: usize,
     pub calib_frac: f32,
     pub calib_seed: u64,
@@ -49,6 +51,8 @@ pub struct TrainConfig {
 pub enum LossKind {
     SoftCe,
     Rlcd,
+    /// Ablation: soft cross-entropy only (the RLCD policy term removed).
+    CeOnly,
 }
 
 impl Default for TrainConfig {
@@ -67,6 +71,7 @@ impl Default for TrainConfig {
             w_rps: 1.0,
             shuffle_types: vec![],
             label_smoothing: 0.0,
+            log: false,
             calib_max: 400,
             calib_frac: 0.1,
             calib_seed: 20260922,
@@ -351,6 +356,10 @@ pub struct TrainReport {
     pub first_loss: f32,
     pub last_loss: f32,
     pub temperatures: [f64; 3],
+    /// Buckets fitted on the held-out split (needs MIN_BUCKET_N pairs);
+    /// empty means the stale temperature_by_options was DROPPED from the
+    /// written config - the artifact is single-temperature.
+    pub temperature_buckets: Vec<(String, f64)>,
     pub steps: usize,
 }
 
@@ -441,25 +450,21 @@ pub fn finetune(
                 burn::tensor::TensorData::new(m_flat, [rows, n_markers]),
                 device,
             );
-            // LAYA_TRAIN_LOSS=ce isolates the CE term (RLCD ablation knob).
-            let loss = match std::env::var("LAYA_TRAIN_LOSS").as_deref() {
-                Ok("ce") => soft_ce(&logits, &target, &mask),
-                _ => match cfg.loss {
-                    LossKind::SoftCe => soft_ce(&logits, &target, &mask),
-                    LossKind::Rlcd => rlcd_loss(
-                        &logits,
-                        &target,
-                        &mask,
-                        &b.qtype,
-                        sigma,
-                        cfg.rl_samples,
-                        cfg.w_sph,
-                        cfg.w_rps,
-                    ),
-                },
+            let loss = match cfg.loss {
+                LossKind::SoftCe | LossKind::CeOnly => soft_ce(&logits, &target, &mask),
+                LossKind::Rlcd => rlcd_loss(
+                    &logits,
+                    &target,
+                    &mask,
+                    &b.qtype,
+                    sigma,
+                    cfg.rl_samples,
+                    cfg.w_sph,
+                    cfg.w_rps,
+                ),
             };
             let lv = loss.clone().into_scalar::<f32>();
-            if std::env::var("LAYA_TRAIN_LOG").is_ok() {
+            if cfg.log {
                 eprintln!("step {steps}: loss {lv:.6}");
             }
             if first_loss.is_none() {
@@ -475,6 +480,8 @@ pub fn finetune(
 
     // Calibration pass: collect logits (canonical order) on held-out items.
     let mut pairs_by_type: [Vec<(Vec<f32>, Vec<f32>)>; 3] = Default::default();
+    let mut pairs_by_bucket: std::collections::BTreeMap<String, Vec<(Vec<f32>, Vec<f32>)>> =
+        Default::default();
     for chunk in calib.chunks(cfg.micro_batch.max(1)) {
         // calibration is always canonical order: the cached encodings
         let seqs: Vec<(Vec<i64>, Vec<usize>, i64)> = chunk
@@ -489,7 +496,9 @@ pub fn finetune(
         for (r, row) in chunk.iter().enumerate() {
             let k = row.target.len();
             let z: Vec<f32> = (0..k).map(|c| vals[r * n_markers + c]).collect();
-            pairs_by_type[row.q.qtype].push((z, row.target.clone()));
+            pairs_by_type[row.q.qtype].push((z.clone(), row.target.clone()));
+            let bucket = crate::calibration::Calibration::temp_bucket(row.q.qtype, k);
+            pairs_by_bucket.entry(bucket).or_default().push((z, row.target.clone()));
         }
     }
     let temperatures = [
@@ -497,6 +506,18 @@ pub fn finetune(
         fit_one_temperature(&pairs_by_type[1], 10),
         fit_one_temperature(&pairs_by_type[2], 10),
     ];
+    // Per-bucket fits (official MIN_BUCKET_N floor: a bucket needs 2000
+    // pairs before its fitted value outranks anything). With fewer, the
+    // bucket is NOT written - and when no bucket qualifies, the stale
+    // pre-finetune temperature_by_options is dropped entirely (the official
+    // small-data notebook does the same cfg.pop), so the written artifact
+    // is exactly what serving will use.
+    const MIN_BUCKET_N: usize = 2000;
+    let temperature_buckets: Vec<(String, f64)> = pairs_by_bucket
+        .iter()
+        .filter(|(_, pairs)| pairs.len() >= MIN_BUCKET_N)
+        .map(|(bucket, pairs)| (bucket.clone(), fit_one_temperature(pairs, MIN_BUCKET_N)))
+        .collect();
 
     // Write the complete out_dir: weights, config (with temperatures),
     // tokenizer, encoder config.
@@ -511,6 +532,20 @@ pub fn finetune(
     .map_err(|e| e.to_string())?)
     .map_err(|e| e.to_string())?;
     out_cfg["temperature"] = serde_json::json!(temperatures);
+    if temperature_buckets.is_empty() {
+        if let Some(obj) = out_cfg.as_object_mut() {
+            obj.remove("temperature_by_options");
+        }
+    } else {
+        let map = out_cfg
+            .as_object_mut()
+            .unwrap()
+            .entry("temperature_by_options")
+            .or_insert_with(|| serde_json::json!({}));
+        for (bucket, t) in &temperature_buckets {
+            map[bucket] = serde_json::json!(t);
+        }
+    }
     std::fs::write(
         format!("{out_dir}/rl_agent_config.json"),
         serde_json::to_string_pretty(&out_cfg).unwrap(),
@@ -537,13 +572,14 @@ pub fn finetune(
         first_loss: first_loss.unwrap_or(0.0),
         last_loss,
         temperatures,
+        temperature_buckets,
         steps,
     })
 }
 
 
 
-fn soft_ce(logits: &Tensor<2>, target: &Tensor<2>, mask: &Tensor<2>) -> Tensor<1> {
+pub fn soft_ce(logits: &Tensor<2>, target: &Tensor<2>, mask: &Tensor<2>) -> Tensor<1> {
     // masked-OUT slots get -1e9 before the softmax: (mask - 1) * 1e9
     let add = (mask.clone() - 1.0).mul_scalar(1.0e9);
     let logp = burn::tensor::activation::log_softmax(logits.clone() + add, 1);

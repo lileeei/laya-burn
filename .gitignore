@@ -12,3 +12,4 @@ parity/ref_out/
 *.mpk
 wasm/pkg
 ft-*/
+tests/fixtures/grad_parity/rust_*

@@ -123,9 +123,11 @@ passes end to end:
 - **Gradients flow** through the full stack (encoder layer 10 grad norm 2.5,
   head grad norm 5e-2) on `Device::default().autodiff()`. Params opt in via
   `Tensor::autodiff().require_grad()` (re-applied after every optimizer step).
-- **Official loss**: `proper_loss_choice` ports rl_common's proper scoring
-  rule (log score + 0.5 spherical; the RPS term is ordinal-only). A fixed
-  6-row batch overfits under AdamW: loss 1.06 -> 0.06 (-94%).
+- **Official losses**: `train.rs` ports the proper scoring rule
+  (`proper_reward_host`, parameterized weights) and both training losses
+  (`soft_ce`, `rlcd_core`); the spike runs the SHARED loss (its private
+  port with drifted weights - w_sph 0.5 vs 0.75 - is gone). A fixed 6-row
+  batch overfits under AdamW on the shared path.
 - **Export back**: `laya_burn::export::export_safetensors` writes the official
   PyTorch safetensors layout (206 tensors, linear weights un-transposed,
   `temperature` buffer included) - the reference `RLAgent.load_state_dict`

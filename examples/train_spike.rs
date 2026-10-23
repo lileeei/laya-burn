@@ -7,44 +7,10 @@
 use burn::module::{Module, ModuleMapper, Param};
 use burn::optim::{AdamWConfig, GradientsParams, ModuleOptimizer};
 
-/// Mark every float param as a tracked leaf (the autodiff device provides
-/// tracking; leaves must opt in via require_grad, and optimizer.step returns
-/// fresh tensors that need re-marking).
-struct RequireGrad;
-impl burn::module::ModuleMapper for RequireGrad {
-    fn map_float<const D: usize>(&mut self, param: Param<Tensor<D>>) -> Param<Tensor<D>> {
-        param.map(|t| t.autodiff().require_grad())
-    }
-}
 use burn::tensor::{Device, Int, Tensor};
 
 use laya_burn::inference::RlAgent;
 use laya_burn::sequence::{build_sequence, Question, QTYPES};
-
-/// Port of rl_common.proper_reward for the choice rows of one batch
-/// (log score + 0.5 * spherical score; RPS applies to ordinal only).
-/// Returns the LOSS = -mean(reward), differentiable end to end.
-fn proper_loss_choice(logits: &Tensor<2>, gold: &[usize], k: usize) -> Tensor<1> {
-    // q: [rows, k]
-    let q = burn::tensor::activation::softmax(logits.clone(), 1);
-    // logq with the official floor
-    let logq = q.clone().clamp_min(1e-12).log().clamp_min(-9.21);
-    // target: one-hot
-    let rows = gold.len();
-    let mut t = vec![0.0f32; rows * k];
-    for (r, &g) in gold.iter().enumerate() {
-        t[r * k + g] = 1.0;
-    }
-    let target = Tensor::<2>::from_data(
-        burn::tensor::TensorData::new(t, [rows, k]),
-        &logits.device(),
-    );
-    let log_score = (target.clone() * logq).sum_dim(1);
-    let sph = (target * q.clone()).sum_dim(1)
-        / (q.clone() * q).sum_dim(1).sqrt().clamp_min(1e-9);
-    let reward = log_score + sph.mul_scalar(0.5);
-    reward.mean().mul_scalar(-1.0)
-}
 
 fn main() {
     let device = Device::default().autodiff();
@@ -84,7 +50,7 @@ fn main() {
     // own copy - which padded marker_pos with 0 where the shared one pads -1).
     let pad = agent.tok.pad_token_id;
 
-    let mut model: laya_burn::model::Laya = agent.model.map(&mut RequireGrad);
+    let mut model: laya_burn::model::Laya = agent.model.map(&mut laya_burn::train::RequireGrad);
     let mut optim: ModuleOptimizer = AdamWConfig::new().init();
     let lr = 1e-4f64;
 
@@ -93,7 +59,20 @@ fn main() {
         let b = laya_burn::inference::collate_batch(&seqs, pad, &device);
         let n_markers = b.marker_pos.dims()[1];
         let (logits, _act) = laya_burn::inference::forward_batch(&model, &agent.ropes, &b);
-        let loss = proper_loss_choice(&logits, &gold, n_markers);
+        let rows = gold.len();
+        let mut t_flat = vec![0.0f32; rows * n_markers];
+        let mut m_flat = vec![0.0f32; rows * n_markers];
+        for (r, &g) in gold.iter().enumerate() {
+            t_flat[r * n_markers + g] = 1.0;
+            for c in 0..n_markers {
+                m_flat[r * n_markers + c] = 1.0;
+            }
+        }
+        let target = Tensor::<2>::from_data(
+            burn::tensor::TensorData::new(t_flat, [rows, n_markers]), &device);
+        let mask = Tensor::<2>::from_data(
+            burn::tensor::TensorData::new(m_flat, [rows, n_markers]), &device);
+        let loss = laya_burn::train::soft_ce(&logits, &target, &mask);
         let lv: f32 = loss.clone().into_scalar::<f32>();
         if step == 0 {
             first_loss = Some(lv as f64);
@@ -113,7 +92,7 @@ fn main() {
             assert!(norm(g_head.clone()) > 0.0, "no gradient reached the head");
             assert!(finite(g_enc) && true, "non-finite gradients");
             let grads = GradientsParams::from_grads(grads, &model);
-            model = optim.step(lr, model, grads).map(&mut RequireGrad);
+            model = optim.step(lr, model, grads).map(&mut laya_burn::train::RequireGrad);
             continue;
         }
         if step % 10 == 0 {
@@ -124,14 +103,28 @@ fn main() {
         }
         let grads = loss.backward();
         let grads = GradientsParams::from_grads(grads, &model);
-        model = optim.step(lr, model, grads).map(&mut RequireGrad);
+        model = optim.step(lr, model, grads).map(&mut laya_burn::train::RequireGrad);
     }
     let fl = first_loss.unwrap();
     // re-evaluate final loss after the last step
     let b = laya_burn::inference::collate_batch(&seqs, pad, &device);
     let n_markers = b.marker_pos.dims()[1];
     let (logits, _) = laya_burn::inference::forward_batch(&model, &agent.ropes, &b);
-    let last = proper_loss_choice(&logits.detach(), &gold, n_markers).into_scalar::<f32>() as f64;
+    // final loss on the shared path (approximate: identity target rebuilt)
+    let rows = gold.len();
+    let mut t_flat = vec![0.0f32; rows * n_markers];
+    let mut m_flat = vec![0.0f32; rows * n_markers];
+    for (r, &g) in gold.iter().enumerate() {
+        t_flat[r * n_markers + g] = 1.0;
+        for c in 0..n_markers {
+            m_flat[r * n_markers + c] = 1.0;
+        }
+    }
+    let target = Tensor::<2>::from_data(
+        burn::tensor::TensorData::new(t_flat, [rows, n_markers]), &device);
+    let mask = Tensor::<2>::from_data(
+        burn::tensor::TensorData::new(m_flat, [rows, n_markers]), &device);
+    let last = laya_burn::train::soft_ce(&logits.detach(), &target, &mask).into_scalar::<f32>() as f64;
     println!("first loss {:.6} -> last loss {:.6} (drop {:.1}%)", fl, last, 100.0 * (1.0 - last / fl));
     assert!(last < fl * 0.9, "loss did not fall: the overfit test failed");
     println!("TRAIN SPIKE: PASS (gradients flow; batch overfits under AdamW)");

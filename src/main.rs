@@ -264,9 +264,19 @@ fn run_convert(dir: &str) {
 
 fn run_finetune(data: &str, model_dir: &str, out_dir: &str, epochs: usize, micro_batch: usize) {
     let device = pick_device().autodiff();
+    // Env knobs live at the binary edge (the library reads none):
+    // LAYA_TRAIN_LOSS=ce ablates the RLCD policy term; LAYA_TRAIN_LOG=1
+    // prints per-step losses.
+    let loss = if std::env::var("LAYA_TRAIN_LOSS").as_deref() == Ok("ce") {
+        laya_burn::train::LossKind::CeOnly
+    } else {
+        laya_burn::train::LossKind::Rlcd
+    };
     let cfg = laya_burn::train::TrainConfig {
         epochs,
         micro_batch: if micro_batch > 0 { micro_batch } else { 8 },
+        loss,
+        log: std::env::var("LAYA_TRAIN_LOG").is_ok(),
         ..Default::default()
     };
     let t0 = std::time::Instant::now();

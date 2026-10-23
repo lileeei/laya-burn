@@ -3,7 +3,9 @@
 //! loss + d(loss)/d(logits) for comparison with the PyTorch reference.
 fn main() {
     use burn::tensor::{Device, Tensor, TensorData};
-    let dir = "/tmp/grad_parity";
+    // Default: the committed fixture (regenerate with scripts/gen_grad_parity.py;
+    // pass a dir to compare against a fresh generation without touching it).
+    let dir = std::env::args().nth(1).unwrap_or_else(|| "tests/fixtures/grad_parity".into());
     let meta: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(format!("{dir}/meta.json")).unwrap()).unwrap();
     let rows = meta["rows"].as_u64().unwrap() as usize;
@@ -66,6 +68,6 @@ fn main() {
         }
     }
     let bytes: Vec<u8> = rewards.iter().flat_map(|v| v.to_le_bytes()).collect();
-    std::fs::write(format!("{dir}/rust_rewards.f32"), bytes).unwrap();
-    println!("rust loss: {lv}");
+    std::fs::write(format!("{dir}/rust_rewards.f32"), bytes).unwrap(); // gitignored output
+    println!("rust loss: {lv} (fixture {dir})");
 }
