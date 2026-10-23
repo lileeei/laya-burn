@@ -101,6 +101,15 @@ Committed results:
   published 72-label numbers. Suites regenerate via
   `scripts/build_app_suites.py` (needs the HF dataset cache; JSONL inputs
   are gitignored, ~4MB).
+- `evals/real_tasks_report.json` + `evals/real_tasks.py` — real-task
+  validation against the official SDK on the 41-example learning path's
+  task shapes (email presets, JSON states, conversation turns,
+  high-cardinality choice, long documents, confidence gating): f32 10/12
+  agree within tolerance, and the suite caught two real port bugs no
+  benchmark had (noul criteria arms dropped; compact-vs-python state
+  serialization on every dict-state request) - both fixed in jev.rs.
+  Robustness: 16-way concurrent serving identical-answer stable, clean 400s
+  on malformed requests, language routing correct.
 - `evals/sweep51_results.json` — english checkpoint forced on all 51
   languages: macro 0.2247 vs official 0.2269.
 - `evals/sweep51_routed_results.json` — AUTO routing (english for Latin,

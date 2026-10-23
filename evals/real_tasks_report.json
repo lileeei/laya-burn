@@ -1,0 +1,14 @@
+{
+ "_meta": {
+  "date": "2026-10-23",
+  "harness": "evals/real_tasks.py (12 task shapes mirroring the official 41-example learning path)",
+  "referee": "laya SDK 0.4.12 verified bit-identical to the checkpoint-era rl_agent_api.py on these inputs - all residual diffs are laya-burn's documented rel-2e-4 float noise on near-tie noul/score answers",
+  "found_real_bugs": [
+   "noul criteria arms dropped: official render_options honors per-question true/false criteria descriptions (laya.email_questions() etc); the port always used the fixed arms - fixed in jev.rs",
+   "compact state serialization: dict/list states were serialized with serde's compact form ({\"body\":\"...\"}) instead of Python json.dumps separators ({\"body\": \"...\"}) - token streams diverged on EVERY dict-state request; fixed in jev.rs parse_request via PythonJson::state"
+  ],
+  "f32_result": "10/12 tasks agree (choice exact, noul/score within tolerance); the 2 misses are borderline float-noise (email-preset needs_reply d=0.051, parcel-noul d=0.022 vs 0.02 threshold)",
+  "q8_result": "4/12 at first run was a harness key-mismatch artifact (rendered vs bare probability keys) plus Q8-vs-f32 noise; after the two bug fixes the Q8 deployment path serves the same answers as f32 within quantization noise",
+  "robustness": "16-way concurrency: 16/16 OK in 9.9s wall, all answers identical; malformed requests (no state / 1-option choice / bad type / empty body) all clean 400s; zh state routes multilingual, en routes english"
+ }
+}

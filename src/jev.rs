@@ -46,10 +46,23 @@ fn render_options(qtype: &str, criteria: &Value) -> Vec<String> {
                     .collect()
             })
             .unwrap_or_default(),
-        _ => vec![
-            "false: no, the statement does not hold".into(),
-            "true: yes, the statement holds".into(),
-        ],
+        // noul: criteria descriptions override the default arm wording
+        // (official render_options; the port had dropped this branch, which
+        // the real-task suite caught as large noul drift on criteria-carrying
+        // questions like laya.email_questions()).
+        _ => {
+            let arm = |which: &str, fallback: &str| -> String {
+                match criteria.get(which) {
+                    Some(Value::String(s)) if !s.is_empty() => format!("{which}: {s}"),
+                    Some(Value::String(_)) | None => format!("{which}: {fallback}"),
+                    _ => format!("{which}: {fallback}"),
+                }
+            };
+            vec![
+                arm("false", "no, the statement does not hold"),
+                arm("true", "yes, the statement holds"),
+            ]
+        }
     }
 }
 
@@ -66,12 +79,15 @@ pub fn question_from_jev(q: &Value) -> Option<QuestionInput> {
     };
     let instructions = match q.get("instructions") {
         Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
+        Some(other) => crate::python_json::PythonJson::state(other),
         None => String::new(),
     };
     let criteria = q.get("criteria").cloned().unwrap_or(Value::Null);
     let keys = match (qtype, &criteria) {
         ("choice", Value::Object(m)) => m.keys().cloned().collect(),
+        ("noul", Value::Object(m)) if m.contains_key("true") || m.contains_key("false") => {
+            vec!["false".to_string(), "true".to_string()]
+        }
         _ => Vec::new(),
     };
     // Official option_order: a permutation of range(n) placing option
@@ -109,9 +125,12 @@ pub struct JevRequest {
 
 /// Parse and validate a Jev request body.
 pub fn parse_request(body: &Value) -> Result<JevRequest, String> {
+    // Non-string states serialize PYTHON-style (json.dumps default
+    // separators) - the port had serde's compact form here, which the
+    // real-task suite caught as drift on every dict-state request.
     let state = match body.get("state") {
         Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
+        Some(other) => crate::python_json::PythonJson::state(other),
         None => return Err("missing state".into()),
     };
     let questions_body = body

@@ -45,6 +45,7 @@ impl LoadOptions {
         let pack = match std::env::var("LAYA_BURNPACK").as_deref() {
             Ok("q8") => PackChoice::Q8Pack,
             Ok("1") | Ok("f32") => PackChoice::F32Pack,
+            Ok("safetensors") | Ok("st") => PackChoice::Safetensors,
             _ => PackChoice::Auto,
         };
         Self {
