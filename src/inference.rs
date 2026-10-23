@@ -117,22 +117,6 @@ fn read_temperatures(
 }
 
 
-/// Temperature for one question: the fitted per-bucket value when the map
-/// carries it, the qtype base temperature otherwise (official temp_bucket
-/// semantics). Pure so the bucket/fallback rule is table-testable.
-pub(crate) fn temperature_for(
-    temperature: &[f64; 3],
-    temperature_by_options: &[(String, f64)],
-    qtype: usize,
-    k: usize,
-) -> f64 {
-    let bucket = Calibration::temp_bucket(qtype, k);
-    temperature_by_options
-        .iter()
-        .find(|(key, _)| *key == bucket)
-        .map(|&(_, t)| t)
-        .unwrap_or(temperature[qtype])
-}
 
 /// The decision tail: one question's logits + its temperature -> its Answer.
 /// Pure math over (z, temp, qtype, act_probability); this is the test
@@ -438,7 +422,7 @@ impl RlAgent {
         let mut answers = Vec::new();
         for (r, (_, q)) in rows.iter().enumerate() {
             let k = seqs[r].1.len();
-            let temp = temperature_for(&self.temperature, &self.temperature_by_options, q.qtype, k);
+            let temp = crate::calibration::temperature_for(&self.temperature, &self.temperature_by_options, q.qtype, k);
             // The act head is per-row: row r's act_probability comes from
             // act_rows[2r..2r+2], NOT row 0's (the old copy used row 0 for
             // every row - invisible while act saturates at 1.0).
@@ -826,13 +810,13 @@ mod tail_tests {
         ];
         let base = [1.6, 1.25, 1.98];
         // 20 options -> "choice:11+" bucket: fitted 0.5, not base 1.6
-        assert_eq!(temperature_for(&base, &by_options, 0, 20), 0.5);
+        assert_eq!(crate::calibration::temperature_for(&base, &by_options, 0, 20), 0.5);
         // 4 options -> "choice:2"? no: "choice:3-5" is not fitted -> base
-        assert_eq!(temperature_for(&base, &by_options, 0, 4), 1.6);
+        assert_eq!(crate::calibration::temperature_for(&base, &by_options, 0, 4), 1.6);
         // noul always k=2 -> fitted 2.0
-        assert_eq!(temperature_for(&base, &by_options, 2, 2), 2.0);
+        assert_eq!(crate::calibration::temperature_for(&base, &by_options, 2, 2), 2.0);
         // score never fitted here -> base
-        assert_eq!(temperature_for(&base, &by_options, 1, 5), 1.25);
+        assert_eq!(crate::calibration::temperature_for(&base, &by_options, 1, 5), 1.25);
     }
 
     /// Temperature sharpening: lower temperature -> sharper distribution,

@@ -13,7 +13,7 @@ import time
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-from massive_eval import build_case, render_label  # noqa: E402
+from common import build_case, render_label, ask, write_sweep, load_sweep  # noqa: E402
 
 BASE = os.environ.get("LAYA_SWEEP_BASE", "http://127.0.0.1:8086")
 OUT = os.environ.get("LAYA_SWEEP_OUT", "evals/sweep51_routed_results.json")
@@ -23,15 +23,6 @@ LANGS = ["af","am","ar","az","bn","cy","da","de","el","en","es","fa","fi","fr",
          "ta","te","th","tl","tr","ur","vi","zh-CN","zh-TW"]
 
 from datasets import load_dataset
-
-
-def ask_routed(state, question):
-    body = json.dumps({"state": state, "questions": question}).encode()
-    req = urllib.request.Request(f"{BASE}/v1/decide", data=body,
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        out = json.load(resp)
-    return out.get("model", "?"), out["answers"]["intent"]
 
 
 def run_lang(lang, n_opts=20, per_lang=100):
@@ -45,7 +36,12 @@ def run_lang(lang, n_opts=20, per_lang=100):
         pool = [x for x in labels if x != row["label_text"]]
         state, question, gold_idx = build_case(row["text"], row["label_text"], pool, rng, n_opts)
         keys = list(question["intent"]["criteria"])
-        model, ans = ask_routed(state, question)
+        body = json.dumps({"state": state, "questions": question}).encode()
+        req = urllib.request.Request(f"{BASE}/v1/decide", data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            out = json.load(resp)
+        model, ans = out.get("model", "?"), out["answers"]["intent"]
         routes[model] = routes.get(model, 0) + 1
         pred = next((k for k in keys
                      if ans["choice"] == f"{k}: {render_label(k)}" or ans["choice"] == k), None)

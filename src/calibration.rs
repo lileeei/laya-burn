@@ -126,3 +126,66 @@ impl Calibration {
         (value * 10_000.0).round_ties_even() / 10_000.0
     }
 }
+
+/// Temperature for one question: the fitted per-bucket value when the map
+/// carries it, the qtype base temperature otherwise (official temp_bucket
+/// semantics). Pure so the bucket/fallback rule is table-testable.
+pub fn temperature_for(
+    temperature: &[f64; 3],
+    temperature_by_options: &[(String, f64)],
+    qtype: usize,
+    k: usize,
+) -> f64 {
+    let bucket = Calibration::temp_bucket(qtype, k);
+    temperature_by_options
+        .iter()
+        .find(|(key, _)| *key == bucket)
+        .map(|&(_, t)| t)
+        .unwrap_or(temperature[qtype])
+}
+
+/// calibrate.py fit_one_temperature: minimise mean softmax NLL over log T
+/// (golden-section on the bounded band, the LBFGS stand-in), clamp to
+/// [0.5, 5]. Returns 1.0 under min_n pairs.
+pub fn fit_one_temperature(pairs: &[(Vec<f32>, Vec<f32>)], min_n: usize) -> f64 {
+    if pairs.len() < min_n {
+        return 1.0;
+    }
+    let nll = |log_t: f64| -> f64 {
+        let scale = log_t.exp();
+        let mut total = 0.0f64;
+        for (z, target) in pairs {
+            let max = z.iter().map(|v| *v as f64).fold(f64::NEG_INFINITY, f64::max);
+            let sum: f64 = z.iter().map(|v| ((*v as f64 - max) / scale).exp()).sum();
+            let ce: f64 = target
+                .iter()
+                .zip(z.iter())
+                .map(|(t, v)| -(*t as f64) * (((*v as f64 - max) / scale).exp() / sum).ln())
+                .sum();
+            total += ce;
+        }
+        total / pairs.len() as f64
+    };
+    // the search band derives from the SERVING clamp constants - fitting
+    // and serving can never disagree about the temperature range
+    let band = ((Calibration::TEMP_MIN).ln() - 10.0, Calibration::TEMP_MAX.ln() + 10.0);
+    // golden-section minimisation
+    let phi = 0.618_033_988_749_894_9;
+    let (mut lo, mut hi) = band;
+    let mut c = hi - phi * (hi - lo);
+    let mut d = lo + phi * (hi - lo);
+    for _ in 0..200 {
+        if nll(c) < nll(d) {
+            hi = d;
+        } else {
+            lo = c;
+        }
+        c = hi - phi * (hi - lo);
+        d = lo + phi * (hi - lo);
+        if (hi - lo).abs() < 1e-7 {
+            break;
+        }
+    }
+    let t = ((lo + hi) / 2.0).exp();
+    t.clamp(Calibration::TEMP_MIN, Calibration::TEMP_MAX)
+}

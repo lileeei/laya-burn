@@ -11,7 +11,7 @@ import statistics
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-from massive_eval import build_case, render_label, ask_server  # noqa: E402
+from common import build_case, render_label, ask, write_sweep, load_sweep  # noqa: E402
 
 BASE = os.environ.get("LAYA_SWEEP_BASE", "http://127.0.0.1:8086")
 OUT = os.environ.get("LAYA_SWEEP_OUT", "/tmp/sweep51_ours.json")
@@ -32,7 +32,7 @@ def run_lang(lang, n_opts=20, per_lang=100):
         pool = [x for x in labels if x != row["label_text"]]
         state, question, gold_idx = build_case(row["text"], row["label_text"], pool, rng, n_opts)
         keys = list(question["intent"]["criteria"])
-        ans = ask_server(BASE, state, question)
+        ans = ask(BASE, state, question)
         pred = next((k for k in keys
                      if ans["choice"] == f"{k}: {render_label(k)}" or ans["choice"] == k), None)
         if pred == keys[gold_idx]:
@@ -50,7 +50,7 @@ def main():
             continue
         results[lang] = {"n": n, "accuracy": c / n}
         print(f"{lang}: {c}/{n} = {c/n:.2f}  ({time.time()-t0:.0f}s, {i+1}/51)", flush=True)
-        json.dump(results, open(OUT, "w"), indent=1)
+        write_sweep(OUT, results, {"method": "english checkpoint forced, n=100/lang, seed 13, 20 options"})
     if results:
         print("macro accuracy:", round(statistics.mean(v["accuracy"] for v in results.values()), 4),
               "over", len(results), "languages")

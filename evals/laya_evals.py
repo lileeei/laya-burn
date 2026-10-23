@@ -22,9 +22,10 @@ Usage:
 """
 import argparse
 import json
-import math
 import sys
-import urllib.request
+
+sys.path.insert(0, __file__.rsplit("/", 1)[0])
+from common import ask, answer_confidence, ece_score  # noqa: E402
 
 
 def load_jsonl(path):
@@ -44,54 +45,12 @@ def load_jsonl(path):
     return rows
 
 
-def ask_server(base, state, questions, timeout=300):
-    body = json.dumps({"state": state, "questions": questions}).encode()
-    req = urllib.request.Request(f"{base}/v1/decide", data=body,
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.load(resp)["answers"]
-
-
-def answer_confidence(answer):
-    c = answer.get("answer_confidence")
-    if isinstance(c, (int, float)):
-        return float(c)
-    c = answer.get("confidence")
-    if isinstance(c, (int, float)):
-        return float(c)
-    if answer.get("type") == "noul":
-        p = float(answer.get("noul", 0.0))
-        return max(p, 1.0 - p)
-    probs = answer.get("probabilities")
-    if isinstance(probs, dict) and probs:
-        return max(float(v) for v in probs.values())
-    if isinstance(probs, list) and probs:
-        return max(float(v) for v in probs)
-    return None
-
-
 def correct_of(answer, expected):
     if answer.get("type") == "choice" and isinstance(expected, str):
         return answer.get("choice") == expected
     if answer.get("type") == "noul" and isinstance(expected, bool):
         return bool(answer.get("noul", 0.0) >= 0.5) == expected
     return None  # score: no canonical binary correctness (official semantics)
-
-
-def ece_score(conf, correct, bins=15):
-    if not conf:
-        return None
-    edges = [i / bins for i in range(bins + 1)]
-    e = 0.0
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        sel = [(c, k) for c, k in zip(conf, correct) if lo < c <= hi] or \
-              [(c, k) for c, k in zip(conf, correct) if c == lo == 0.0]
-        if not sel:
-            continue
-        acc = sum(k for _, k in sel) / len(sel)
-        avg = sum(c for c, _ in sel) / len(sel)
-        e += len(sel) / len(conf) * abs(acc - avg)
-    return e
 
 
 def summarize(cases):
@@ -126,7 +85,7 @@ def run(args):
     rows = load_jsonl(args.data)
     cases = []
     for r_i, row in enumerate(rows):
-        answers = ask_server(args.base, row["state"], row["questions"])
+        answers = ask(args.base, row["state"], row["questions"])
         for qid, answer in answers.items():
             expected = row["expected"].get(qid)
             a = {

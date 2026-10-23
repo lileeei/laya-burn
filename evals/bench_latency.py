@@ -12,6 +12,8 @@ import sys
 import time
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(__file__))
+
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8090"
 REPEATS = int(os.environ.get("LAYA_BENCH_REPEATS", "20"))
 

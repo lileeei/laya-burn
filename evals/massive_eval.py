@@ -7,37 +7,15 @@ Compare with the committed sweep (english ckpt, en): acc 0.82 f1 0.7876 ece 0.17
 """
 import argparse
 import json
+import os
 import random
 import statistics
-import urllib.request
+import sys
 
-SEED = 13
-INSTRUCTIONS = "What is the user asking for in `utterance`?"
+sys.path.insert(0, os.path.dirname(__file__))
+from common import ask, answer_confidence, ece_score, SEED, INSTRUCTIONS, render_label, build_case  # noqa: E402
+
 ECE_BINS = 15
-
-
-def render_label(key):
-    return key.replace("_", " ").replace(".", ": ")
-
-
-def build_case(text, gold, pool, rng, n_opts):
-    keys = [gold] + rng.sample(list(pool), min(n_opts - 1, len(pool)))
-    rng.shuffle(keys)
-    state = {"utterance": text}
-    question = {"intent": {
-        "type": "choice",
-        "instructions": INSTRUCTIONS,
-        "criteria": {k: render_label(k) for k in keys},
-    }}
-    return state, question, keys.index(gold)
-
-
-def ask_server(base, state, question):
-    body = json.dumps({"state": state, "questions": question}).encode()
-    req = urllib.request.Request(base + "/v1/decide", data=body,
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        return json.load(resp)["answers"]["intent"]
 
 
 def main():
@@ -61,7 +39,7 @@ def main():
         state, question, gold_idx = build_case(row["text"], row["label_text"],
                                                 pool, rng, args.n_opts)
         keys = list(question["intent"]["criteria"])
-        ans = ask_server(args.base, state, question)
+        ans = ask(args.base, state, question)["intent"]
         # our server renders choices as "<key>: <rendered>" (blank criteria give the bare key)
         pred_key = next((k for k in keys if ans["choice"] == f"{k}: {render_label(k)}" or ans["choice"] == k), None)
         gold_key = keys[gold_idx]

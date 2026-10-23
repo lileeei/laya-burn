@@ -15,17 +15,12 @@ import os
 import sys
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(__file__))
+from common import ask  # noqa: E402
+
 FIXTURE = os.environ.get("LAYA_EVAL_FIXTURE",
                          "/tmp/laya-official/research/evals/fixture.jsonl")
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8095"
-
-
-def ask_server(item):
-    body = json.dumps({"state": item["state"], "questions": item["questions"]}).encode()
-    req = urllib.request.Request(f"{BASE}/v1/decide", data=body,
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        return json.load(resp)["answers"]
 
 
 def extract(answer):
@@ -44,7 +39,7 @@ def main():
 
     ours = []
     for i, item in enumerate(items):
-        ans = ask_server(item)
+        ans = ask(BASE, item["state"], item["questions"])
         ours.append({qid: extract(a) for qid, a in ans.items()})
         if (i + 1) % 5 == 0:
             print(f"  {i + 1}/{len(items)} via server")
@@ -86,7 +81,7 @@ def main():
     # second server pass capturing full answers for calibration metrics
     full_answers = []
     for item in items:
-        full_answers.append(ask_server(item))
+        full_answers.append(ask(BASE, item["state"], item["questions"]))
 
     for i, item in enumerate(items):
         for qid, expected in item["expected"].items():

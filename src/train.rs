@@ -302,49 +302,6 @@ pub fn sigma_at(epoch: usize, epochs: usize, start: f32, end: f32) -> f32 {
     start + (end - start) * (epoch as f32 / epochs.saturating_sub(1).max(1) as f32)
 }
 
-/// calibrate.py fit_one_temperature: minimise mean softmax NLL over log T
-/// (golden-section on the bounded band, the LBFGS stand-in), clamp to
-/// [0.5, 5]. Returns 1.0 under min_n pairs.
-pub fn fit_one_temperature(pairs: &[(Vec<f32>, Vec<f32>)], min_n: usize) -> f64 {
-    if pairs.len() < min_n {
-        return 1.0;
-    }
-    let nll = |log_t: f64| -> f64 {
-        let scale = log_t.exp();
-        let mut total = 0.0f64;
-        for (z, target) in pairs {
-            let max = z.iter().map(|v| *v as f64).fold(f64::NEG_INFINITY, f64::max);
-            let sum: f64 = z.iter().map(|v| ((*v as f64 - max) / scale).exp()).sum();
-            let ce: f64 = target
-                .iter()
-                .zip(z.iter())
-                .map(|(t, v)| -(*t as f64) * (((*v as f64 - max) / scale).exp() / sum).ln())
-                .sum();
-            total += ce;
-        }
-        total / pairs.len() as f64
-    };
-    let band = ((0.5f64).ln() - 10.0, 5.0f64.ln() + 10.0);
-    // golden-section minimisation
-    let phi = 0.618_033_988_749_894_9;
-    let (mut lo, mut hi) = band;
-    let mut c = hi - phi * (hi - lo);
-    let mut d = lo + phi * (hi - lo);
-    for _ in 0..200 {
-        if nll(c) < nll(d) {
-            hi = d;
-        } else {
-            lo = c;
-        }
-        c = hi - phi * (hi - lo);
-        d = lo + phi * (hi - lo);
-        if (hi - lo).abs() < 1e-7 {
-            break;
-        }
-    }
-    let t = ((lo + hi) / 2.0).exp();
-    t.clamp(0.5, 5.0)
-}
 
 /// Everything the caller needs from a finetune run.
 #[derive(Debug)]
@@ -502,9 +459,9 @@ pub fn finetune(
         }
     }
     let temperatures = [
-        fit_one_temperature(&pairs_by_type[0], 10),
-        fit_one_temperature(&pairs_by_type[1], 10),
-        fit_one_temperature(&pairs_by_type[2], 10),
+        crate::calibration::fit_one_temperature(&pairs_by_type[0], 10),
+        crate::calibration::fit_one_temperature(&pairs_by_type[1], 10),
+        crate::calibration::fit_one_temperature(&pairs_by_type[2], 10),
     ];
     // Per-bucket fits (official MIN_BUCKET_N floor: a bucket needs 2000
     // pairs before its fitted value outranks anything). With fewer, the
@@ -516,7 +473,7 @@ pub fn finetune(
     let temperature_buckets: Vec<(String, f64)> = pairs_by_bucket
         .iter()
         .filter(|(_, pairs)| pairs.len() >= MIN_BUCKET_N)
-        .map(|(bucket, pairs)| (bucket.clone(), fit_one_temperature(pairs, MIN_BUCKET_N)))
+        .map(|(bucket, pairs)| (bucket.clone(), crate::calibration::fit_one_temperature(pairs, MIN_BUCKET_N)))
         .collect();
 
     // Write the complete out_dir: weights, config (with temperatures),
@@ -830,13 +787,13 @@ mod train_tests {
     fn fit_temperature_pulls_a_sharp_row_toward_its_confidence() {
         // confident correct logits -> fitted T below 1 (sharpen further helps NLL)
         let pairs = vec![(vec![4.0f32, 0.0, 0.0], vec![1.0f32, 0.0, 0.0]); 12];
-        let t = fit_one_temperature(&pairs, 10);
+        let t = crate::calibration::fit_one_temperature(&pairs, 10);
         assert!(t < 1.0, "confident row should sharpen: {t}");
         // under min_n -> neutral
-        assert_eq!(fit_one_temperature(&pairs[..3], 10), 1.0);
+        assert_eq!(crate::calibration::fit_one_temperature(&pairs[..3], 10), 1.0);
         // overconfident-wrong -> T above 1 (soften)
         let pairs = vec![(vec![4.0f32, 0.0, 0.0], vec![0.0f32, 1.0, 0.0]); 12];
-        let t = fit_one_temperature(&pairs, 10);
+        let t = crate::calibration::fit_one_temperature(&pairs, 10);
         assert!(t > 1.0, "wrong-confident row should soften: {t}");
     }
 
