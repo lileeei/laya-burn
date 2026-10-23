@@ -394,7 +394,7 @@ impl RlAgent {
             let (ids, markers) = build_sequence_ex(
                 &self.tok,
                 state_str,
-                &Question { qtype: q.qtype, instructions: q.instructions.clone(), options: q.options.clone() },
+                &Question::from(*q),
                 self.max_len,
                 self.head_max_len,
                 q.option_order.as_deref(),
@@ -404,37 +404,30 @@ impl RlAgent {
         }
         let batch_len: usize = seqs.iter().map(|(ids, _, _)| ids.len()).max().unwrap();
         let n_markers: usize = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
-        let b = collate(&seqs, self.tok.pad_token_id, batch_len, n_markers);
-        let Batch { input_ids: b_input_ids, attention_mask: b_attention_mask, marker_pos: b_marker_pos, marker_mask: b_marker_mask, qtype: b_qtype } = b;
+        let b = collate_batch(&seqs, self.tok.pad_token_id, device);
 
         if let Some(dir) = &self.dump_dir {
             let _ = std::fs::create_dir_all(&dir);
-            let rows: Vec<String> = b_input_ids
-                .iter()
+            let ids = b.input_ids.clone().into_data();
+            let rows: Vec<String> = ids
+                .as_slice::<i32>()
+                .unwrap_or(&[])
+                .chunks(batch_len)
                 .map(|r| r.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
                 .collect();
-            let _ = std::fs::write(format!("{dir}/all_rows.txt"), rows.join("
-"));
+            let _ = std::fs::write(format!("{dir}/all_rows.txt"), rows.join("\n"));
         }
         // LAYA_REPLAY=1 routes the forward through the per-shape graph
-        // cache; when unset (replay == None) the direct path below runs
-        // exactly as before.
+        // cache; when unset (replay == None) the direct path runs.
         let key: ShapeKey = (seqs.len(), batch_len, n_markers);
         let (logits, act_logits) = match replay {
-            None => self.model.forward(
-                t2i(b_input_ids, batch_len, device),
-                t2i(b_attention_mask, batch_len, device),
-                t2i(b_marker_pos, n_markers, device),
-                t2i(b_marker_mask, n_markers, device),
-                t1i(b_qtype, device),
-                &self.ropes,
-            ),
+            None => forward_batch(&self.model, &self.ropes, &b),
             Some(engine) => engine.run(key, || StableInputs {
-                input_ids: t2i(b_input_ids, batch_len, device),
-                attention_mask: t2i(b_attention_mask, batch_len, device),
-                marker_pos: t2i(b_marker_pos, n_markers, device),
-                marker_mask: t2i(b_marker_mask, n_markers, device),
-                qtype: t1i(b_qtype, device),
+                input_ids: b.input_ids.clone(),
+                attention_mask: b.attention_mask.clone(),
+                marker_pos: b.marker_pos.clone(),
+                marker_mask: b.marker_mask.clone(),
+                qtype: b.qtype.clone(),
             }),
         };
 
@@ -660,6 +653,63 @@ impl<'a> ReplayEngine<'a> {
             let out = (logits.clone(), act_logits.clone());
             self.entries.insert(key, entry);
             out
+        }
+    }
+}
+
+/// A collated batch tensorized on the device: the SINGLE encode->collate->
+/// tensorization product, shared by inference, training and calibration
+/// (previously four private copies whose padding details had started to
+/// drift - e.g. spike padded marker_pos with 0, here -1 with mask 0).
+pub struct DeviceBatch {
+    pub input_ids: Tensor<2, Int>,
+    pub attention_mask: Tensor<2, Int>,
+    pub marker_pos: Tensor<2, Int>,
+    pub marker_mask: Tensor<2, Int>,
+    pub qtype: Tensor<1, Int>,
+}
+
+/// Collate encoded rows and put them on the device.
+pub fn collate_batch(
+    seqs: &[(Vec<i64>, Vec<usize>, i64)],
+    pad: i64,
+    device: &Device,
+) -> DeviceBatch {
+    let batch_len: usize = seqs.iter().map(|(ids, _, _)| ids.len()).max().unwrap();
+    let n_markers: usize = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
+    let Batch { input_ids, attention_mask, marker_pos, marker_mask, qtype } =
+        collate(seqs, pad, batch_len, n_markers);
+    DeviceBatch {
+        input_ids: t2i(input_ids, batch_len, device),
+        attention_mask: t2i(attention_mask, batch_len, device),
+        marker_pos: t2i(marker_pos, n_markers, device),
+        marker_mask: t2i(marker_mask, n_markers, device),
+        qtype: t1i(qtype, device),
+    }
+}
+
+/// The single batched forward. Takes `&Laya` (not an agent) so training can
+/// pass its RequireGrad-mapped clone and calibration its stepped model -
+/// one forward site, three callers.
+pub fn forward_batch(model: &Laya, ropes: &Ropes, batch: &DeviceBatch) -> (Tensor<2>, Tensor<2>) {
+    model.forward(
+        batch.input_ids.clone(),
+        batch.attention_mask.clone(),
+        batch.marker_pos.clone(),
+        batch.marker_mask.clone(),
+        batch.qtype.clone(),
+        ropes,
+    )
+}
+
+/// The encode-facing view of a wire question (sequence.rs stays decoupled
+/// from the answer contract: keys/option_order are answer-side data).
+impl From<&QuestionInput> for Question {
+    fn from(q: &QuestionInput) -> Self {
+        Question {
+            qtype: q.qtype,
+            instructions: q.instructions.clone(),
+            options: q.options.clone(),
         }
     }
 }

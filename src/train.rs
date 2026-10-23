@@ -15,7 +15,7 @@ use burn::optim::{AdamWConfig, GradientsParams, ModuleOptimizer};
 use burn::tensor::{Device, Tensor};
 use serde_json::Value;
 
-use crate::inference::{collate, t1i, t2i, RlAgent};
+use crate::inference::RlAgent;
 use crate::sequence::{build_sequence_ex, unpermute, Question, QTYPES};
 
 /// Training knobs (official TrainConfig defaults where they apply to the
@@ -84,13 +84,29 @@ impl ModuleMapper for RequireGrad {
     }
 }
 
-/// One encoded training row: ids, marker positions (slot order), qtype,
-/// target distribution aligned to the markers.
-pub struct TrainItem {
-    pub ids: Vec<i64>,
-    pub markers: Vec<usize>,
-    pub qtype: usize,
+/// One labelled training row. `canonical` is the identity-order encoding,
+/// computed once at load (fit check) and reused by calibration and by any
+/// epoch that does not shuffle - only shuffled epochs re-encode.
+pub struct TrainRow {
+    pub state: String,
+    pub q: Question,
     pub target: Vec<f32>,
+    pub canonical: (Vec<i64>, Vec<usize>),
+}
+
+impl Clone for TrainRow {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            q: Question {
+                qtype: self.q.qtype,
+                instructions: self.q.instructions.clone(),
+                options: self.q.options.clone(),
+            },
+            target: self.target.clone(),
+            canonical: self.canonical.clone(),
+        }
+    }
 }
 
 /// target_from_expected (train.py): the normalised target distribution in
@@ -179,15 +195,15 @@ fn permute_target(target: &[f32], order: &[usize]) -> Vec<f32> {
     order.iter().map(|&i| target[i]).collect()
 }
 
-/// Encode one row-question pair (state string, QuestionInput-like q) with an
-/// optional presentation order; skips pairs whose options do not fit
-/// (markers dropped = training on a truncated answer space, official skips).
-fn encode_item(
+/// Encode one row-question pair with an optional presentation order; skips
+/// pairs whose options do not fit (markers dropped = training on a truncated
+/// answer space, official skips).
+fn encode(
     agent: &RlAgent,
     state: &str,
     q: &Question,
     order: Option<&[usize]>,
-) -> Option<TrainItem> {
+) -> Option<(Vec<i64>, Vec<usize>)> {
     let (ids, markers) = build_sequence_ex(
         &agent.tok,
         state,
@@ -200,7 +216,7 @@ fn encode_item(
     if markers.len() != q.options.len() {
         return None; // options did not fit; skip rather than train truncated
     }
-    Some(TrainItem { ids, markers, qtype: q.qtype, target: vec![] })
+    Some((ids, markers))
 }
 
 /// items_from_jsonl: laya-evals rows {state, questions, expected} -> items.
@@ -208,7 +224,7 @@ fn encode_item(
 pub fn items_from_jsonl(
     agent: &RlAgent,
     path: &str,
-) -> Result<(Vec<(String, usize, Question, Vec<f32>)>, HashMap<String, usize>), String> {
+) -> Result<(Vec<TrainRow>, HashMap<String, usize>), String> {
     let mut items = Vec::new();
     let mut skipped: HashMap<String, usize> = HashMap::new();
     for line in std::fs::read_to_string(path).map_err(|e| e.to_string())?.lines() {
@@ -233,11 +249,7 @@ pub fn items_from_jsonl(
                 *skipped.entry("invalid_question".into()).or_default() += 1;
                 continue;
             };
-            let q = Question {
-                qtype: input.qtype,
-                instructions: input.instructions.clone(),
-                options: input.options.clone(),
-            };
+            let q = Question::from(&input);
             let target = match target_from_expected(&q, &input.keys, expected_val, 0.0) {
                 Ok(t) if t.len() == q.options.len() => t,
                 Ok(_) | Err(_) => {
@@ -245,10 +257,11 @@ pub fn items_from_jsonl(
                     continue;
                 }
             };
-            if encode_item(agent, &state, &q, None).is_some() {
-                items.push((state.clone(), q.qtype, q, target));
-            } else {
-                *skipped.entry("options_did_not_fit".into()).or_default() += 1;
+            match encode(agent, &state, &q, None) {
+                Some(canonical) => items.push(TrainRow { state: state.clone(), q, target, canonical }),
+                None => {
+                    *skipped.entry("options_did_not_fit".into()).or_default() += 1;
+                }
             }
         }
     }
@@ -357,14 +370,11 @@ pub fn finetune(
         return Err(format!("no training items (skipped: {skipped:?})"));
     }
     let held = split_calibration(all.len(), cfg.calib_max, cfg.calib_frac, cfg.calib_seed);
-    let train: Vec<(String, usize, Question, Vec<f32>)> = all
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !held.contains(i))
-        .map(|(_, x)| x.clone())
+    let train: Vec<TrainRow> = (0..all.len())
+        .filter(|i| !held.contains(i))
+        .map(|i| all[i].clone())
         .collect();
-    let calib: Vec<(String, usize, Question, Vec<f32>)> =
-        held.iter().filter_map(|&i| all.get(i).cloned()).collect();
+    let calib: Vec<TrainRow> = held.iter().map(|&i| all[i].clone()).collect();
 
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
 
@@ -395,30 +405,24 @@ pub fn finetune(
         for chunk in train.chunks(cfg.micro_batch.max(1)) {
             let mut seqs = Vec::new();
             let mut targets = Vec::new();
-            for (state, _qtype, q, target) in chunk {
-                let k = q.options.len();
-                let order = if cfg.shuffle_types.iter().any(|t| t == QTYPES[q.qtype]) && k >= 2 {
-                    shuffle(k)
+            for row in chunk {
+                let k = row.q.options.len();
+                let shuffled = cfg.shuffle_types.iter().any(|t| t == QTYPES[row.q.qtype]) && k >= 2;
+                let order: Vec<usize> = if shuffled { shuffle(k) } else { (0..k).collect() };
+                // identity order reuses the canonical encoding cached at
+                // load; only shuffled epochs re-encode
+                let (ids, markers) = if shuffled {
+                    encode(&agent, &row.state, &row.q, Some(&order))
+                        .ok_or("options did not fit at train time")?
                 } else {
-                    (0..k).collect()
+                    row.canonical.clone()
                 };
-                let item =
-                    encode_item(&agent, state, q, Some(&order))
-                        .ok_or("options did not fit at train time")?;
-                seqs.push((item.ids, item.markers, q.qtype as i64));
-                targets.push(permute_target(target, &order));
+                seqs.push((ids, markers, row.q.qtype as i64));
+                targets.push(permute_target(&row.target, &order));
             }
-            let batch_len = seqs.iter().map(|(ids, _, _)| ids.len()).max().unwrap().max(1);
-            let n_markers = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
-            let b = collate(&seqs, agent.tok.pad_token_id, batch_len, n_markers);
-            let (logits, _act) = model.forward(
-                t2i(b.input_ids.clone(), batch_len, device),
-                t2i(b.attention_mask.clone(), batch_len, device),
-                t2i(b.marker_pos.clone(), n_markers, device),
-                t2i(b.marker_mask.clone(), n_markers, device),
-                t1i(b.qtype.clone(), device),
-                &agent.ropes,
-            );
+            let b = crate::inference::collate_batch(&seqs, agent.tok.pad_token_id, device);
+            let n_markers = b.marker_pos.dims()[1];
+            let (logits, _act) = crate::inference::forward_batch(&model, &agent.ropes, &b);
             // target/mask padded to n_markers columns
             let rows = seqs.len();
             let mut t_flat = vec![0.0f32; rows * n_markers];
@@ -446,7 +450,7 @@ pub fn finetune(
                         &logits,
                         &target,
                         &mask,
-                        &t1i(b.qtype.clone(), device),
+                        &b.qtype,
                         sigma,
                         cfg.rl_samples,
                         cfg.w_sph,
@@ -472,29 +476,20 @@ pub fn finetune(
     // Calibration pass: collect logits (canonical order) on held-out items.
     let mut pairs_by_type: [Vec<(Vec<f32>, Vec<f32>)>; 3] = Default::default();
     for chunk in calib.chunks(cfg.micro_batch.max(1)) {
-        let mut seqs = Vec::new();
-        for (state, _, q, _) in chunk {
-            let item = encode_item(&agent, state, q, None)
-                .ok_or("options did not fit at calibration time")?;
-            seqs.push((item.ids, item.markers, q.qtype as i64));
-        }
-        let batch_len = seqs.iter().map(|(ids, _, _)| ids.len()).max().unwrap().max(1);
+        // calibration is always canonical order: the cached encodings
+        let seqs: Vec<(Vec<i64>, Vec<usize>, i64)> = chunk
+            .iter()
+            .map(|row| (row.canonical.0.clone(), row.canonical.1.clone(), row.q.qtype as i64))
+            .collect();
         let n_markers = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
-        let b = collate(&seqs, agent.tok.pad_token_id, batch_len, n_markers);
-        let (logits, _act) = model.forward(
-            t2i(b.input_ids.clone(), batch_len, device),
-            t2i(b.attention_mask.clone(), batch_len, device),
-            t2i(b.marker_pos.clone(), n_markers, device),
-            t2i(b.marker_mask.clone(), n_markers, device),
-            t1i(b.qtype.clone(), device),
-            &agent.ropes,
-        );
+        let b = crate::inference::collate_batch(&seqs, agent.tok.pad_token_id, device);
+        let (logits, _act) = crate::inference::forward_batch(&model, &agent.ropes, &b);
         let logits = logits.detach().into_data();
         let vals = logits.as_slice::<f32>().map_err(|e| format!("{e:?}"))?;
-        for (r, (_, qtype, _, target)) in chunk.iter().enumerate() {
-            let k = target.len();
+        for (r, row) in chunk.iter().enumerate() {
+            let k = row.target.len();
             let z: Vec<f32> = (0..k).map(|c| vals[r * n_markers + c]).collect();
-            pairs_by_type[*qtype].push((z, target.clone()));
+            pairs_by_type[row.q.qtype].push((z, row.target.clone()));
         }
     }
     let temperatures = [

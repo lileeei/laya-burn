@@ -22,6 +22,9 @@ reviews; add a term here the moment code starts relying on it.
   keyed answers out (`choice` = criteria key, `answer_confidence` =
   p(reported answer), `action.act_probability`). Shared by laya-serve and the
   wasm runtime.
+- **Calibration split** — the held-out items  reserves BEFORE training; temperatures are fitted on them only.
+- **Temperature bucket** — the per-(qtype, option-count) key (e.g. `choice:11+`) whose fitted temperature outranks the qtype base at serving.
+- **RLCD** — the official policy-gradient objective: advantage-weighted Gaussian log-density over noise samples plus soft cross-entropy (see train.rs::rlcd_core).
 - **Route** — a Router decision mapping a state's script/language to a
   checkpoint (`english` / `typed-decisions` / `multilingual`).
 - **Proper scoring rule** — the official training loss family (log score +

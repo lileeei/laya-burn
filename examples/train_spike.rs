@@ -80,36 +80,9 @@ fn main() {
         seqs.push((ids, markers, 0i64));
         gold.push(*g);
     }
-    let batch_len = seqs.iter().map(|(i, ..)| i.len()).max().unwrap().max(1);
-    let n_markers = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
+    // The SHARED collate+forward primitive (this spike used to carry its
+    // own copy - which padded marker_pos with 0 where the shared one pads -1).
     let pad = agent.tok.pad_token_id;
-    let mut input_ids = Vec::new();
-    let mut attention_mask = Vec::new();
-    let mut marker_pos = Vec::new();
-    let mut marker_mask = Vec::new();
-    let mut qtype = Vec::new();
-    for (ids, markers, _) in &seqs {
-        let mut row = ids.clone();
-        let mut amask = vec![1i64; ids.len()];
-        while row.len() < batch_len { row.push(pad); amask.push(0); }
-        input_ids.push(row); attention_mask.push(amask);
-        let mut mpos = Vec::new(); let mut mmask = Vec::new();
-        for i in 0..n_markers {
-            if i < markers.len() { mpos.push(markers[i] as i64); mmask.push(1); }
-            else { mpos.push(0); mmask.push(0); }
-        }
-        marker_pos.push(mpos); marker_mask.push(mmask);
-        qtype.push(0);
-    }
-    let t2i = |rows: Vec<Vec<i64>>, cols: usize| -> Tensor<2, Int> {
-        let n = rows.len();
-        let flat: Vec<i64> = rows.into_iter().flatten().collect();
-        Tensor::<2, Int>::from_data(burn::tensor::TensorData::new(flat, [n, cols]), &device)
-    };
-    let t1i = |v: Vec<i64>| -> Tensor<1, Int> {
-        let n = v.len();
-        Tensor::<1, Int>::from_data(burn::tensor::TensorData::new(v, [n]), &device)
-    };
 
     let mut model: laya_burn::model::Laya = agent.model.map(&mut RequireGrad);
     let mut optim: ModuleOptimizer = AdamWConfig::new().init();
@@ -117,14 +90,9 @@ fn main() {
 
     let mut first_loss = None;
     for step in 0..=60 {
-        let (logits, _act) = model.forward(
-            t2i(input_ids.clone(), batch_len),
-            t2i(attention_mask.clone(), batch_len),
-            t2i(marker_pos.clone(), n_markers),
-            t2i(marker_mask.clone(), n_markers),
-            t1i(qtype.clone()),
-            &agent.ropes,
-        );
+        let b = laya_burn::inference::collate_batch(&seqs, pad, &device);
+        let n_markers = b.marker_pos.dims()[1];
+        let (logits, _act) = laya_burn::inference::forward_batch(&model, &agent.ropes, &b);
         let loss = proper_loss_choice(&logits, &gold, n_markers);
         let lv: f32 = loss.clone().into_scalar::<f32>();
         if step == 0 {
@@ -160,14 +128,9 @@ fn main() {
     }
     let fl = first_loss.unwrap();
     // re-evaluate final loss after the last step
-    let (logits, _) = model.forward(
-        t2i(input_ids.clone(), batch_len),
-        t2i(attention_mask.clone(), batch_len),
-        t2i(marker_pos.clone(), n_markers),
-        t2i(marker_mask.clone(), n_markers),
-        t1i(qtype.clone()),
-        &agent.ropes,
-    );
+    let b = laya_burn::inference::collate_batch(&seqs, pad, &device);
+    let n_markers = b.marker_pos.dims()[1];
+    let (logits, _) = laya_burn::inference::forward_batch(&model, &agent.ropes, &b);
     let last = proper_loss_choice(&logits.detach(), &gold, n_markers).into_scalar::<f32>() as f64;
     println!("first loss {:.6} -> last loss {:.6} (drop {:.1}%)", fl, last, 100.0 * (1.0 - last / fl));
     assert!(last < fl * 0.9, "loss did not fall: the overfit test failed");
