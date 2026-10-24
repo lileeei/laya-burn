@@ -4,7 +4,7 @@
 near-equal groups of group_size (16), one round per shrink, finalist call.
 
 Usage: python3 evals/run_tournament.py [base] [n_rows]"""
-import sys, time
+import os, sys, time
 sys.path.insert(0, os.path.dirname(__file__))
 from common import ask  # noqa: E402
 from datasets import load_dataset  # noqa: E402

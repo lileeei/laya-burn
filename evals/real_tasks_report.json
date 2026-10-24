@@ -9,6 +9,17 @@
   ],
   "f32_result": "10/12 tasks agree (choice exact, noul/score within tolerance); the 2 misses are borderline float-noise (email-preset needs_reply d=0.051, parcel-noul d=0.022 vs 0.02 threshold)",
   "q8_result": "4/12 at first run was a harness key-mismatch artifact (rendered vs bare probability keys) plus Q8-vs-f32 noise; after the two bug fixes the Q8 deployment path serves the same answers as f32 within quantization noise",
-  "robustness": "16-way concurrency: 16/16 OK in 9.9s wall, all answers identical; malformed requests (no state / 1-option choice / bad type / empty body) all clean 400s; zh state routes multilingual, en routes english"
+  "robustness": "16-way concurrency: 16/16 OK in 9.9s wall, all answers identical; malformed requests (no state / 1-option choice / bad type / empty body) all clean 400s; zh state routes multilingual, en routes english",
+  "f32_result_final": "12/12 tasks agree after all three wire-contract fixes (was 10/12 at first run, 4/12 before the bug hunt) - every answer now matches the SDK to 4 decimals (d <= 0.0004)",
+  "real_task_validation_20261024": {
+   "real_tasks_12_shapes": "12/12 (choice exact, noul/score d <= 0.0004 vs SDK) - was 4/12 before the three wire-contract fixes",
+   "runners_from_repo": {
+    "es_phone (multilingual)": "0.4224/0.4222/0.1111/0.3548 - reproduces the documented zero-shot row",
+    "feishu_zh (multilingual)": "19/192 + 18/192 - reproduces exactly",
+    "tournament banking77 n=300": "single 0.3367 -> tournament 0.5433 (+20.7 points; official 0.4301 -> 0.6096)"
+   },
+   "micro_batcher_mixed_language": "24 reqs (en/zh/es) 12-way concurrent through LAYA_BATCH_MS=150: routes split english/multilingual 12/12 correctly, all answered, wall 17.9s; spot-check zh refund -> multilingual/billing, en refund -> english/billing",
+   "end_to_end_finetune_serve": "laya finetune (4 epochs, 38s) -> serve the produced checkpoint dir through the normal router -> 0.8889 on zh_short_commands (base model 0.6111): the train->calibrate->export->serve loop is one command chain"
+  }
  }
 }
