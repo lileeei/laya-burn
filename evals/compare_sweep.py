@@ -8,7 +8,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from common import load_sweep  # noqa: E402
 
 _, ours = load_sweep(os.environ.get('LAYA_SWEEP_OURS', '/tmp/sweep51_ours.json'))
-ref = json.load(open('/tmp/laya-official/research/results/cpu_51_language_sweep.json'))
+OFFICIAL = os.environ.get("LAYA_OFFICIAL", "/tmp/laya-official")
+ref = json.load(open(f'{OFFICIAL}/research/results/cpu_51_language_sweep.json'))
 ref_pl = ref['part_a']['by_model']['english']['per_language']
 
 rows = []

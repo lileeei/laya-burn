@@ -86,9 +86,18 @@ python3 evals/sweep51.py ...                                    # 51-language sw
 python3 evals/bench_latency.py http://127.0.0.1:8090            # p50/p95 latency
 ```
 
+> **The optional comparison layer**: eval scripts marked `vs official` in
+> the list below need a local clone of the upstream
+> [convaiinnovations/laya](https://huggingface.co/convaiinnovations/laya)
+> repository (its frozen prompts, committed result JSONs, and in one case
+> the Python SDK as a referee). Point them at it with `LAYA_OFFICIAL=<path>`
+> (default `/tmp/laya-official`). The library, its tests, and every runner
+> NOT marked `vs official` are fully self-contained - a fresh clone passes
+> `cargo test` with zero external dependencies.
+
 Committed results:
 
-- `evals/app_benchmark_results_ours.json` — the official 10-suite application
+- `evals/app_benchmark_results_ours.json` *(vs official)* — the official 10-suite application
   benchmark (ag_news / emotion / banking77 / support triage / email spam /
   phishing / jailbreak / toxicity / RAG relevance / model routing; n=400,
   seed 13, suites built by reusing the official `bench_apps.build()`
@@ -101,7 +110,7 @@ Committed results:
   published 72-label numbers. Suites regenerate via
   `scripts/build_app_suites.py` (needs the HF dataset cache; JSONL inputs
   are gitignored, ~4MB).
-- `evals/real_tasks_report.json` + `evals/real_tasks.py` — real-task
+- `evals/real_tasks_report.json` + `evals/real_tasks.py` *(vs official)* — real-task
   validation against the official SDK on the 41-example learning path's
   task shapes (email presets, JSON states, conversation turns,
   high-cardinality choice, long documents, confidence gating): f32 10/12
@@ -110,7 +119,7 @@ Committed results:
   serialization on every dict-state request) - both fixed in jev.rs.
   Robustness: 16-way concurrent serving identical-answer stable, clean 400s
   on malformed requests, language routing correct.
-- `evals/official_benchmarks_results.json` — the official frozen-prompt
+- `evals/official_benchmarks_results.json` *(vs official)* — the official frozen-prompt
   benchmark suites: es_phone_turns (Spanish phone routing), feishu_zh
   (Chinese chat triage, choice + four-noul modes), and the banking77
   tournament (group-elimination over high-cardinality choice, implemented

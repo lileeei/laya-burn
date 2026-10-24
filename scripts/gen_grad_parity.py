@@ -2,13 +2,13 @@
 """Generate a fixed batch, run the OFFICIAL rlcd_loss on it (eps injected),
 and dump loss + d(loss)/d(logits) for comparison against the Rust core."""
 import argparse
-import json, sys
+import json, os, sys
 import numpy as np
 import torch
 
 OUT = "tests/fixtures/grad_parity"
 
-sys.path.insert(0, "/tmp/laya-official")
+sys.path.insert(0, os.environ.get("LAYA_OFFICIAL", "/tmp/laya-official"))
 from laya.common import proper_reward  # official reward, verbatim
 
 torch.set_default_dtype(torch.float32)

@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from common import ask  # noqa: E402
 
 FIXTURE = os.environ.get("LAYA_EVAL_FIXTURE",
-                         "/tmp/laya-official/research/evals/fixture.jsonl")
+                         os.environ.get("LAYA_OFFICIAL", "/tmp/laya-official") + "/research/evals/fixture.jsonl")
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8095"
 
 

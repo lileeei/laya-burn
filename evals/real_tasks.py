@@ -16,14 +16,15 @@ import sys
 import urllib.request
 
 os.environ.setdefault("USE_TF", "0")
-sys.path.insert(0, "/tmp/laya-official")
+OFFICIAL = os.environ.get("LAYA_OFFICIAL", "/tmp/laya-official")
+sys.path.insert(0, OFFICIAL)
 sys.path.insert(0, os.path.dirname(__file__))
 
 import laya  # noqa: E402
 from common import ask  # noqa: E402
 
 BASE = os.environ.get("LAYA_BASE", "http://127.0.0.1:8150")
-CKPT = os.environ.get("LAYA_SDK_CKPT", "/Volumes/Elements/project/laya-burn/model-english")
+CKPT = os.environ.get("LAYA_SDK_CKPT", "model-english")
 
 agent = laya.load(CKPT)
 
