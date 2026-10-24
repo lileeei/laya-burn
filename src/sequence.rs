@@ -125,11 +125,11 @@ mod order_tests {
 
     #[test]
     fn option_order_places_markers_in_slot_order_and_unpermute_inverts() {
-        let tok = crate::tokenizer::LayaTokenizer::load("model-english/tokenizer/tokenizer.json");
         if !std::path::Path::new("model-english/tokenizer/tokenizer.json").is_file() {
             eprintln!("skipping: tokenizer not present");
             return;
         }
+        let tok = crate::tokenizer::LayaTokenizer::load("model-english/tokenizer/tokenizer.json");
         let q = Question {
             qtype: 0,
             instructions: "pick".into(),
