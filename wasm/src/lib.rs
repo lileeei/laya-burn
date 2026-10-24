@@ -125,12 +125,13 @@ mod laya_runtime {
         // resolves to the LLVM CubeCL CPU runtime on this target, whose JIT
         // service cannot start inside wasm ('Service not yet initialized').
         let device = Device::flex();
-        let agent = RlAgent::load_q8_bytes(
+        let agent = RlAgent::load_q8_bytes_with(
             pack,
             sidecar_json,
             cfg_json,
             tok_json,
             (!tok_cfg_json.is_empty()).then_some(tok_cfg_json),
+            &laya_burn::options::LoadOptions::default(),
             &device,
         );
         AGENT.with(|a| *a.borrow_mut() = Some((device, agent)));
