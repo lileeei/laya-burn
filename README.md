@@ -139,18 +139,26 @@ Committed results:
 
 | var | effect |
 |---|---|
-| `LAYA_MODEL` | force router route |
-| `LAYA_BURNPACK` | `q8` / `1` (f32) force a pack; unset prefers `model.q8.mpk` then `model.mpk` then safetensors |
-| `LAYA_QUANT=1` | quantize at load (same scheme as the export) |
-| `LAYA_QUANT=<dir>` | legacy alias for `laya quantize <dir>` (`=1` remains the serve-side quantize-at-load knob) |
-| `LAYA_CONVERT=<dir>` | export f32 burnpack (legacy; prefer `laya convert <dir>`) |
+| `LAYA_DEVICE` | `metal` / `wgpu` (default flex CPU) — demo binary device pick |
 | `LAYA_DTYPE` | `bf16` / `f16` compute dtype (default f32, parity-verified) |
-| `LAYA_DEVICE` | `metal` / `wgpu` (default flex CPU) |
-| `LAYA_REPLAY=1` | graph capture/replay fast path |
-| `LAYA_ATTN=manual` | manual sliding-window attention (default: blocked fast path) |
-| `LAYA_UNCLAMPED=1` | raw fitted temperatures (official harness mode) |
-| `LAYA_LOAD` | `bytes` / `q8`: exercise the no-filesystem loaders (the wasm path); answers identical |
-| `LAYA_BATCH_MS` | request micro-batching window in laya-serve |
+| `LAYA_MODEL` | force router route (english/typed-decisions/multilingual/auto) |
+| `LAYA_BURNPACK` | `q8` / `1`/`f32` / `safetensors` force an artifact; unset prefers q8 pack, then f32 pack, then safetensors |
+| `LAYA_QUANT=1` | serve: quantize at load (export scheme). `LAYA_QUANT=<dir>` (binary): legacy alias for `laya quantize` |
+| `LAYA_LOAD` | `bytes` / `q8`: exercise the no-filesystem loaders (the wasm path) |
+| `LAYA_ATTN` | `manual` / `blocks` / `kernel` attention mode (default fused; kernel requires F32 - panics loudly otherwise) |
+| `LAYA_KERNEL` | `v2` selects the second windowed-kernel generation (kernel mode only) |
+| `LAYA_ROPE` | `interleaved` rope variant (default half-split) |
+| `LAYA_MLP` | `swap` swaps the encoder MLP gate/input halves |
+| `LAYA_THETA_SLIDE` | override the sliding rope theta (default 10000) |
+| `LAYA_DUMP_DIR` | parity dumps: `all_rows.txt` + model-level tensors, resolved once at load |
+| `LAYA_REPLAY=1`, `LAYA_REPLAY_N=k` | graph capture/replay fast path (and its repeat count) |
+| `LAYA_BATCH` | demo binary: repeat the question set N times in one forward |
+| `LAYA_STATE`, `LAYA_LONG` | demo binary: zh/ru demo state, long-sequence variant |
+| `LAYA_BATCH_MS`, `LAYA_BATCH_MAX` | serve micro-batching window (ms) and max batch — routes concurrent requests through one predict_many |
+| `LAYA_TRAIN_LOSS=ce`, `LAYA_TRAIN_LOG=1` | finetune: CE-only ablation / per-step loss logging |
+| `LAYA_CONVERT`, `LAYA_PARITY_DEBUG` | legacy convert alias; rlcd_core parity debug output |
+
+Env vars resolve at the binary edge (`LoadOptions::from_env` / `ForwardOptions::from_env`, once); library code reads none (Router::new is the documented serving adapter).
 
 ## Training (direction: trainable)
 

@@ -13,7 +13,12 @@ import time
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-from common import build_case, render_label, ask, write_sweep, load_sweep  # noqa: E402
+from common import build_case, render_label, ask as ask_answers, write_sweep, load_sweep  # noqa: E402
+
+
+def ask_routed(state, question):
+    out = ask_answers(BASE, state, question, model_field=True)
+    return out.get("model", "?"), out["answers"]["intent"]
 
 BASE = os.environ.get("LAYA_SWEEP_BASE", "http://127.0.0.1:8086")
 OUT = os.environ.get("LAYA_SWEEP_OUT", "evals/sweep51_routed_results.json")

@@ -17,17 +17,24 @@ for fname in sorted(os.listdir(SUITES_DIR)):
         continue
     suite = fname[:-6]
     t0 = time.time()
-    r = subprocess.run(
-        ["python3", os.path.join(os.path.dirname(__file__), "laya_evals.py"),
-         "run", os.path.join(SUITES_DIR, fname), "--base", BASE, "--json", f"/tmp/app_case_{suite}_{MODEL}.json"],
-        capture_output=True, text=True)
+    import laya_evals
+    import argparse
+    args = argparse.Namespace(
+        cmd="run", data=os.path.join(SUITES_DIR, fname), base=BASE,
+        json=f"/tmp/app_case_{suite}_{MODEL}.json", min_accuracy=None,
+        max_ece=None, baseline=None,
+        tolerance="accuracy=0.02,ece=0.03,mean_confidence=0.03")
+    import io, contextlib
+    buf = io.StringIO()
     try:
+        with contextlib.redirect_stdout(buf):
+            laya_evals.run(args)
         import json as j
         dec = j.JSONDecoder()
-        obj, _ = dec.raw_decode(r.stdout)
+        obj, _ = dec.raw_decode(buf.getvalue())
         m = obj["overall"]
     except Exception:
-        m = {"error": (r.stderr or r.stdout)[-200:]}
+        m = {"error": buf.getvalue()[-200:] or "no output"}
     secs = time.time() - t0
     acc = m.get("accuracy") or m.get("choice_accuracy") or m.get("noul_accuracy")
     print(f"{MODEL}/{suite}: acc {acc} ({secs:.0f}s)", flush=True)

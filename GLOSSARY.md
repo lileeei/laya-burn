@@ -29,4 +29,4 @@ reviews; add a term here the moment code starts relying on it.
   checkpoint (`english` / `typed-decisions` / `multilingual`).
 - **Proper scoring rule** — the official training loss family (log score +
   spherical + ordinal RPS); the choice-row port lives in
-  `examples/train_spike.rs::proper_loss_choice`.
+  `train.rs::proper_reward_host`.
