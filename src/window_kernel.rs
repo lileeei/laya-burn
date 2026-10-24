@@ -22,6 +22,13 @@
 //! cube parallelism rather than K/V bandwidth, and R sets of softmax state add
 //! register pressure - so the simpler v1 stays the default. Set LAYA_KERNEL=v2
 //! to select v2.
+// NOTE upstream path: an earlier branch (origin/window-kernel, deleted
+// 2026-10-24) instead added a `window` field to burn's AttentionModuleOptions
+// and passed it through module::attention - simpler, but required patched
+// local burn/cubek forks; released burn 0.22 has no such field. This crate
+// kernel achieves the same long-seq win (-17% on 40q) on RELEASED
+// dependencies. If burn upstream ever ships AttentionModuleOptions.window,
+// revisit that path.
 // Historical note (from the deleted examples/kernel_spike.rs probe): custom
 // cubecl kernels plug in via burn-backend-extension (`BackendExtension`),
 // with `Kernel` impls launched through `cubecl::launch`. The differential
