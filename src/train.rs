@@ -16,6 +16,7 @@ use burn::tensor::{Device, Tensor};
 use serde_json::Value;
 
 use crate::inference::RlAgent;
+use crate::model::Laya;
 use crate::sequence::{build_sequence_ex, Question, QTYPES};
 
 /// Training knobs (official TrainConfig defaults where they apply to the
@@ -336,12 +337,20 @@ pub fn finetune(
     if all.is_empty() {
         return Err(format!("no training items (skipped: {skipped:?})"));
     }
+    // Held-out calibration split taken BEFORE training; partition by
+    // index so each TrainRow lives exactly once (no all+train+calib
+    // triple residency of the canonical encodings).
     let held = split_calibration(all.len(), cfg.calib_max, cfg.calib_frac, cfg.calib_seed);
-    let train: Vec<TrainRow> = (0..all.len())
-        .filter(|i| !held.contains(i))
-        .map(|i| all[i].clone())
-        .collect();
-    let calib: Vec<TrainRow> = held.iter().map(|&i| all[i].clone()).collect();
+    let mut train: Vec<TrainRow> = Vec::new();
+    let mut calib: Vec<TrainRow> = Vec::new();
+    for (i, row) in all.into_iter().enumerate() {
+        if held.binary_search(&i).is_ok() {
+            calib.push(row);
+        } else {
+            train.push(row);
+        }
+    }
+    let n_items = train.len() + calib.len();
 
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
 
@@ -363,102 +372,23 @@ pub fn finetune(
         order
     };
 
-    let mut first_loss = None;
+    let mut first_loss: Option<f32> = None;
     let mut last_loss = 0.0f32;
     let mut steps = 0usize;
-
     for epoch in 0..cfg.epochs {
         let sigma = sigma_at(epoch, cfg.epochs, cfg.sigma_start, cfg.sigma_end);
-        for chunk in train.chunks(cfg.micro_batch.max(1)) {
-            let mut seqs = Vec::new();
-            let mut targets = Vec::new();
-            for row in chunk {
-                let k = row.q.options.len();
-                let shuffled = cfg.shuffle_types.iter().any(|t| t == QTYPES[row.q.qtype]) && k >= 2;
-                let order: Vec<usize> = if shuffled { shuffle(k) } else { (0..k).collect() };
-                // identity order reuses the canonical encoding cached at
-                // load; only shuffled epochs re-encode
-                let (ids, markers) = if shuffled {
-                    encode(&agent, &row.state, &row.q, Some(&order))
-                        .ok_or("options did not fit at train time")?
-                } else {
-                    row.canonical.clone()
-                };
-                seqs.push((ids, markers, row.q.qtype as i64));
-                targets.push(permute_target(&row.target, &order));
-            }
-            let b = crate::inference::collate_batch(&seqs, agent.tok.pad_token_id, device);
-            let n_markers = b.marker_pos.dims()[1];
-            let (logits, _act) = crate::inference::forward_batch(&model, &agent.ropes, &b, &agent.fopts);
-            // target/mask padded to n_markers columns
-            let rows = seqs.len();
-            let mut t_flat = vec![0.0f32; rows * n_markers];
-            let mut m_flat = vec![0.0f32; rows * n_markers];
-            for (r, t) in targets.iter().enumerate() {
-                for (s, &v) in t.iter().enumerate() {
-                    t_flat[r * n_markers + s] = v;
-                    m_flat[r * n_markers + s] = 1.0;
-                }
-            }
-            let target = Tensor::<2>::from_data(
-                burn::tensor::TensorData::new(t_flat, [rows, n_markers]),
-                device,
-            );
-            let mask = Tensor::<2>::from_data(
-                burn::tensor::TensorData::new(m_flat, [rows, n_markers]),
-                device,
-            );
-            let loss = match cfg.loss {
-                LossKind::SoftCe | LossKind::CeOnly => soft_ce(&logits, &target, &mask),
-                LossKind::Rlcd => rlcd_loss(
-                    &logits,
-                    &target,
-                    &mask,
-                    &b.qtype,
-                    sigma,
-                    cfg.rl_samples,
-                    cfg.w_sph,
-                    cfg.w_rps,
-                ),
-            };
-            let lv = loss.clone().into_scalar::<f32>();
-            if cfg.log {
-                eprintln!("step {steps}: loss {lv:.6}");
-            }
-            if first_loss.is_none() {
-                first_loss = Some(lv);
-            }
-            last_loss = lv;
-            steps += 1;
-            let grads_tensor = loss.backward();
-            let grads = GradientsParams::from_grads(grads_tensor, &model);
-            model = optim.step(cfg.lr, model, grads).map(&mut RequireGrad);
+        let (m, f, l, n) =
+            epoch_step(&agent, model.clone(), &mut optim, &train, cfg, sigma, &mut shuffle, device)?;
+        model = m;
+        if first_loss.is_none() {
+            first_loss = f;
         }
+        last_loss = l;
+        steps += n;
     }
 
-    // Calibration pass: collect logits (canonical order) on held-out items.
-    let mut pairs_by_type: [Vec<(Vec<f32>, Vec<f32>)>; 3] = Default::default();
-    let mut pairs_by_bucket: std::collections::BTreeMap<String, Vec<(Vec<f32>, Vec<f32>)>> =
-        Default::default();
-    for chunk in calib.chunks(cfg.micro_batch.max(1)) {
-        // calibration is always canonical order: the cached encodings
-        let seqs: Vec<(Vec<i64>, Vec<usize>, i64)> = chunk
-            .iter()
-            .map(|row| (row.canonical.0.clone(), row.canonical.1.clone(), row.q.qtype as i64))
-            .collect();
-        let n_markers = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
-        let b = crate::inference::collate_batch(&seqs, agent.tok.pad_token_id, device);
-        let (logits, _act) = crate::inference::forward_batch(&model, &agent.ropes, &b, &agent.fopts);
-        let logits = logits.detach().into_data();
-        let vals = logits.as_slice::<f32>().map_err(|e| format!("{e:?}"))?;
-        for (r, row) in chunk.iter().enumerate() {
-            let k = row.target.len();
-            let z: Vec<f32> = (0..k).map(|c| vals[r * n_markers + c]).collect();
-            pairs_by_type[row.q.qtype].push((z.clone(), row.target.clone()));
-            let bucket = crate::calibration::Calibration::temp_bucket(row.q.qtype, k);
-            pairs_by_bucket.entry(bucket).or_default().push((z, row.target.clone()));
-        }
-    }
+    let (pairs_by_type, pairs_by_bucket) =
+        collect_calibration_logits(&agent, &model, &calib, cfg, device)?;
     let temperatures = [
         crate::calibration::fit_one_temperature(&pairs_by_type[0], 10),
         crate::calibration::fit_one_temperature(&pairs_by_type[1], 10),
@@ -474,57 +404,16 @@ pub fn finetune(
     let temperature_buckets: Vec<(String, f64)> = pairs_by_bucket
         .iter()
         .filter(|(_, pairs)| pairs.len() >= MIN_BUCKET_N)
-        .map(|(bucket, pairs)| (bucket.clone(), crate::calibration::fit_one_temperature(pairs, MIN_BUCKET_N)))
+        .map(|(bucket, pairs)| {
+            (bucket.clone(), crate::calibration::fit_one_temperature(pairs, MIN_BUCKET_N))
+        })
         .collect();
 
-    // Write the complete out_dir: weights, config (with temperatures),
-    // tokenizer, encoder config.
-    crate::export::export_safetensors(
-        &model,
-        [temperatures[0] as f32, temperatures[1] as f32, temperatures[2] as f32],
-        &format!("{out_dir}/model.safetensors"),
-    );
-    let mut out_cfg: Value = serde_json::from_str(&std::fs::read_to_string(format!(
-        "{model_dir}/rl_agent_config.json"
-    ))
-    .map_err(|e| e.to_string())?)
-    .map_err(|e| e.to_string())?;
-    out_cfg["temperature"] = serde_json::json!(temperatures);
-    if temperature_buckets.is_empty() {
-        if let Some(obj) = out_cfg.as_object_mut() {
-            obj.remove("temperature_by_options");
-        }
-    } else {
-        let map = out_cfg
-            .as_object_mut()
-            .unwrap()
-            .entry("temperature_by_options")
-            .or_insert_with(|| serde_json::json!({}));
-        for (bucket, t) in &temperature_buckets {
-            map[bucket] = serde_json::json!(t);
-        }
-    }
-    std::fs::write(
-        format!("{out_dir}/rl_agent_config.json"),
-        serde_json::to_string_pretty(&out_cfg).unwrap(),
-    )
-    .map_err(|e| e.to_string())?;
-    for f in [
-        "tokenizer/tokenizer.json",
-        "tokenizer/tokenizer_config.json",
-        "encoder/config.json",
-    ] {
-        if let Ok(bytes) = std::fs::read(format!("{model_dir}/{f}")) {
-            let out = format!("{out_dir}/{f}");
-            std::fs::create_dir_all(std::path::Path::new(&out).parent().unwrap())
-                .map_err(|e| e.to_string())?;
-            std::fs::write(out, bytes).map_err(|e| e.to_string())?;
-        }
-    }
+    write_checkpoint(&model, model_dir, out_dir, temperatures, &temperature_buckets)?;
 
     Ok(TrainReport {
         out_dir: out_dir.to_string(),
-        items: all.len(),
+        items: n_items,
         skipped,
         calibration_items: calib.len(),
         first_loss: first_loss.unwrap_or(0.0),
@@ -536,6 +425,195 @@ pub fn finetune(
 }
 
 
+
+
+/// One epoch: micro-batch chunks over `train`, optional per-type option
+/// shuffling (identity orders reuse the cached canonical encodings), the
+/// configured loss, AdamW step. Returns (first_loss, last_loss, steps).
+fn epoch_step(
+    agent: &RlAgent,
+    mut model: Laya,
+    optim: &mut ModuleOptimizer,
+    train: &[TrainRow],
+    cfg: &TrainConfig,
+    sigma: f32,
+    shuffle: &mut impl FnMut(usize) -> Vec<usize>,
+    device: &Device,
+) -> Result<(Laya, Option<f32>, f32, usize), String> {
+    let mut first_loss: Option<f32> = None;
+    let mut last_loss = 0.0f32;
+    let mut steps = 0usize;
+    {
+    for chunk in train.chunks(cfg.micro_batch.max(1)) {
+        let mut seqs = Vec::new();
+        let mut targets = Vec::new();
+        for row in chunk {
+            let k = row.q.options.len();
+            let shuffled = cfg.shuffle_types.iter().any(|t| t == QTYPES[row.q.qtype]) && k >= 2;
+            let order: Vec<usize> = if shuffled { shuffle(k) } else { (0..k).collect() };
+            // identity order reuses the canonical encoding cached at
+            // load; only shuffled epochs re-encode
+            let (ids, markers) = if shuffled {
+                encode(&agent, &row.state, &row.q, Some(&order))
+                    .ok_or("options did not fit at train time")?
+            } else {
+                row.canonical.clone()
+            };
+            seqs.push((ids, markers, row.q.qtype as i64));
+            targets.push(permute_target(&row.target, &order));
+        }
+        let b = crate::inference::collate_batch(&seqs, agent.tok.pad_token_id, device);
+        let n_markers = b.marker_pos.dims()[1];
+        let (logits, _act) = crate::inference::forward_batch(&model, &agent.ropes, &b, &agent.fopts);
+        // target/mask padded to n_markers columns
+        let rows = seqs.len();
+        let mut t_flat = vec![0.0f32; rows * n_markers];
+        let mut m_flat = vec![0.0f32; rows * n_markers];
+        for (r, t) in targets.iter().enumerate() {
+            for (s, &v) in t.iter().enumerate() {
+                t_flat[r * n_markers + s] = v;
+                m_flat[r * n_markers + s] = 1.0;
+            }
+        }
+        let target = Tensor::<2>::from_data(
+            burn::tensor::TensorData::new(t_flat, [rows, n_markers]),
+            device,
+        );
+        let mask = Tensor::<2>::from_data(
+            burn::tensor::TensorData::new(m_flat, [rows, n_markers]),
+            device,
+        );
+        let loss = match cfg.loss {
+            LossKind::SoftCe | LossKind::CeOnly => soft_ce(&logits, &target, &mask),
+            LossKind::Rlcd => rlcd_loss(
+                &logits,
+                &target,
+                &mask,
+                &b.qtype,
+                sigma,
+                cfg.rl_samples,
+                cfg.w_sph,
+                cfg.w_rps,
+            ),
+        };
+        let lv = loss.clone().into_scalar::<f32>();
+        if cfg.log {
+            eprintln!("step {steps}: loss {lv:.6}");
+        }
+        if first_loss.is_none() {
+            first_loss = Some(lv);
+        }
+        last_loss = lv;
+        steps += 1;
+        let grads_tensor = loss.backward();
+        let grads = GradientsParams::from_grads(grads_tensor, &model);
+        model = optim.step(cfg.lr, model, grads).map(&mut RequireGrad);
+    }
+    }
+
+
+    Ok((model, first_loss, last_loss, steps))
+}
+
+
+/// Held-out calibration pass in canonical order (the cached encodings):
+/// collects (logits, target) pairs keyed by qtype and by temperature bucket.
+fn collect_calibration_logits(
+    agent: &RlAgent,
+    model: &Laya,
+    calib: &[TrainRow],
+    cfg: &TrainConfig,
+    device: &Device,
+) -> Result<
+    (
+        [Vec<(Vec<f32>, Vec<f32>)>; 3],
+        std::collections::BTreeMap<String, Vec<(Vec<f32>, Vec<f32>)>>,
+    ),
+    String,
+> {
+    let mut pairs_by_type: [Vec<(Vec<f32>, Vec<f32>)>; 3] = Default::default();
+    let mut pairs_by_bucket: std::collections::BTreeMap<String, Vec<(Vec<f32>, Vec<f32>)>> =
+        Default::default();
+    for chunk in calib.chunks(cfg.micro_batch.max(1)) {
+    // calibration is always canonical order: the cached encodings
+    let seqs: Vec<(Vec<i64>, Vec<usize>, i64)> = chunk
+        .iter()
+        .map(|row| (row.canonical.0.clone(), row.canonical.1.clone(), row.q.qtype as i64))
+        .collect();
+    let n_markers = seqs.iter().map(|(_, m, _)| m.len()).max().unwrap();
+    let b = crate::inference::collate_batch(&seqs, agent.tok.pad_token_id, device);
+    let (logits, _act) = crate::inference::forward_batch(&model, &agent.ropes, &b, &agent.fopts);
+    let logits = logits.detach().into_data();
+    let vals = logits.as_slice::<f32>().map_err(|e| format!("{e:?}"))?;
+    for (r, row) in chunk.iter().enumerate() {
+        let k = row.target.len();
+        let z: Vec<f32> = (0..k).map(|c| vals[r * n_markers + c]).collect();
+        pairs_by_type[row.q.qtype].push((z.clone(), row.target.clone()));
+        let bucket = crate::calibration::Calibration::temp_bucket(row.q.qtype, k);
+        pairs_by_bucket.entry(bucket).or_default().push((z, row.target.clone()));
+    }
+    }
+
+    Ok((pairs_by_type, pairs_by_bucket))
+}
+
+
+/// Write the COMPLETE out_dir: weights, config with fitted temperatures
+/// (stale temperature_by_options dropped when no bucket qualifies), the
+/// tokenizer and encoder config copied through - servable as-is.
+#[allow(clippy::type_complexity)]
+fn write_checkpoint(
+    model: &Laya,
+    model_dir: &str,
+    out_dir: &str,
+    temperatures: [f64; 3],
+    temperature_buckets: &[(String, f64)],
+) -> Result<(), String> {
+    crate::export::export_safetensors(
+    &model,
+    [temperatures[0] as f32, temperatures[1] as f32, temperatures[2] as f32],
+    &format!("{out_dir}/model.safetensors"),
+    );
+    let mut out_cfg: Value = serde_json::from_str(&std::fs::read_to_string(format!(
+    "{model_dir}/rl_agent_config.json"
+    ))
+    .map_err(|e| e.to_string())?)
+    .map_err(|e| e.to_string())?;
+    out_cfg["temperature"] = serde_json::json!(temperatures);
+    if temperature_buckets.is_empty() {
+    if let Some(obj) = out_cfg.as_object_mut() {
+        obj.remove("temperature_by_options");
+    }
+    } else {
+    let map = out_cfg
+        .as_object_mut()
+        .unwrap()
+        .entry("temperature_by_options")
+        .or_insert_with(|| serde_json::json!({}));
+    for (bucket, t) in temperature_buckets.iter() {
+        map[bucket] = serde_json::json!(t);
+    }
+    }
+    std::fs::write(
+    format!("{out_dir}/rl_agent_config.json"),
+    serde_json::to_string_pretty(&out_cfg).unwrap(),
+    )
+    .map_err(|e| e.to_string())?;
+    for f in [
+    "tokenizer/tokenizer.json",
+    "tokenizer/tokenizer_config.json",
+    "encoder/config.json",
+    ] {
+    if let Ok(bytes) = std::fs::read(format!("{model_dir}/{f}")) {
+        let out = format!("{out_dir}/{f}");
+        std::fs::create_dir_all(std::path::Path::new(&out).parent().unwrap())
+            .map_err(|e| e.to_string())?;
+        std::fs::write(out, bytes).map_err(|e| e.to_string())?;
+    }
+    }
+
+    Ok(())
+}
 
 pub fn soft_ce(logits: &Tensor<2>, target: &Tensor<2>, mask: &Tensor<2>) -> Tensor<1> {
     // masked-OUT slots get -1e9 before the softmax: (mask - 1) * 1e9
