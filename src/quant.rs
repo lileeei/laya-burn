@@ -218,7 +218,7 @@ mod export_tests {
                 return;
             }
         }
-        let device = burn::tensor::Device::default();
+        let device = burn::tensor::Device::flex();
         let report = super::export_q8(dir, &crate::options::LoadOptions::default(), &device);
         assert!(report.pack_bytes > 300_000_000, "pack suspiciously small");
         assert!(report.round_trip_ok, "eager-dequant reload != in-memory Q8");

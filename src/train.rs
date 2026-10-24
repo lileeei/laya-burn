@@ -923,7 +923,8 @@ mod parity_tests {
             let b = std::fs::read(format!("{dir}/{name}.f32")).unwrap();
             b.chunks(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).take(n).collect()
         };
-        let device = Device::default().autodiff();
+        // flex: pure-CPU backend, works on headless CI runners
+        let device = Device::flex().autodiff();
         let logits = Tensor::<2>::from_data(
             TensorData::new(read("logits", rows * cols), [rows, cols]),
             &device,

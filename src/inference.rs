@@ -699,7 +699,7 @@ mod replay_tests {
     /// would read stale bytes.
     #[test]
     fn refresh_through_shared_slot_is_visible_to_next_invocation() {
-        let device = Device::default();
+        let device = Device::flex();
         let slot: std::rc::Rc<std::cell::RefCell<StableInputs>> = std::rc::Rc::new(std::cell::RefCell::new(StableInputs {
             input_ids: Tensor::<2, Int>::from_data(TensorData::new(vec![1i64, 2, 3, 4], [2, 2]), &device),
             attention_mask: Tensor::<2, Int>::from_data(TensorData::new(vec![1i64, 1, 1, 1], [2, 2]), &device),
