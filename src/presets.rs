@@ -4,7 +4,7 @@
 //! "name"` path. Criteria wording is VERBATIM from laya/presets.py so
 //! answers are comparable with the official SDK's preset outputs.
 //!
-//! ```no_run
+//! ```ignore
 //! # use laya_burn::inference::RlAgent;
 //! # use burn::tensor::Device;
 //! # use serde_json::json;

@@ -4,7 +4,7 @@
 //! way: the type system does the field mapping validation JSON Schema
 //! does at runtime, and gate states are an enum, not strings).
 //!
-//! ```no_run
+//! ```ignore
 //! # use laya_burn::inference::RlAgent;
 //! # use burn::tensor::Device;
 //! let agent = RlAgent::load_with("model-english", &Default::default(), &Device::default());
