@@ -25,6 +25,8 @@ reviews; add a term here the moment code starts relying on it.
 - **Calibration split** — the held-out items  reserves BEFORE training; temperatures are fitted on them only.
 - **Temperature bucket** — the per-(qtype, option-count) key (e.g. `choice:11+`) whose fitted temperature outranks the qtype base at serving.
 - **RLCD** — the official policy-gradient objective: advantage-weighted Gaussian log-density over noise samples plus soft cross-entropy (see train.rs::rlcd_core).
+- **Typed decision surface** — the ask() builder + typed Answers accessors: enum fields become choice questions, bools noul, ordinal ranges score, with the type system doing the mapping validation the official SDK's JSON Schema path does at runtime.
+- **Confidence gate** — a per-bucket minimum-confidence policy applied AFTER a run, producing a three-state verdict per answer (passed / abstained / unevaluated); abstaining is the caller's action, the gate only reports.
 - **Route** — a Router decision mapping a state's script/language to a
   checkpoint (`english` / `typed-decisions` / `multilingual`).
 - **Proper scoring rule** — the official training loss family (log score +

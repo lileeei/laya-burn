@@ -160,6 +160,41 @@ Committed results:
 
 Env vars resolve at the binary edge (`LoadOptions::from_env` / `ForwardOptions::from_env`, once); library code reads none (Router::new is the documented serving adapter).
 
+## Typed decision surface (the ergonomic API)
+
+`agent.ask(&device, &state)` replaces bare `qtype: 0` literals with a typed
+builder, and `Answers` gives typed accessors - the Rust-native answer to
+the official SDK's structured.py need (field-mapping validation happens at
+compile time via the type system, not at runtime via JSON Schema):
+
+```rust
+let out = agent.ask(&device, &json!("Refund invoice 4411"))
+    .choice("department", &["billing", "support", "sales"])
+    .noul("refund_requested")
+    .score("urgency", 0..=3)
+    .run()?;
+
+out.choice("department");       // &str
+out.noul("refund_requested");   // bool
+out.score("urgency");           // i32
+out.answer_confidence("urgency"); // f32
+```
+
+The confidence gate (official confidence.py semantics, Rust-native): a
+per-bucket policy with a THREE-state verdict - `Passed` / `Abstained` /
+`Unevaluated` (the gate ran; the answer carried no usable confidence) -
+because collapsing the third state into either of the others is the lie
+the official design exists to prevent:
+
+```rust
+let gate = Gate::new().min("choice:3-5", 0.9).min("noul:2", 0.5);
+gate.apply(&mut out);
+out.gates(); // [("department", Abstained), ...]
+```
+
+End-to-end demo: `cargo run --release --example ask_demo` (cross-checks
+every answer against the raw API).
+
 ## Training (direction: trainable)
 
 `cargo run --release --example train_spike` is the trainability gate, and it

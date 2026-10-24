@@ -1,6 +1,7 @@
 //! laya-burn: the Laya decision model (ModernBERT encoder + RLCD decision
 //! head) running natively in Rust on the Burn framework.
 
+pub mod ask;
 pub mod calibration;
 pub mod export;
 pub mod inference;
