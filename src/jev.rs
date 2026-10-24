@@ -125,6 +125,17 @@ pub struct JevRequest {
 
 /// Parse and validate a Jev request body.
 pub fn parse_request(body: &Value) -> Result<JevRequest, String> {
+    // `"questions": "name"` expands a task preset (triage/email/guard/
+    // moderation/model_routing) into its frozen question set.
+    if let Some(Value::String(preset)) = body.get("questions") {
+        let questions = crate::presets::wire(preset)
+            .ok_or_else(|| format!("unknown preset {preset:?} (available: {:?})", crate::presets::NAMES))?;
+        let expanded = serde_json::json!({
+            "state": body.get("state").cloned().unwrap_or(Value::Null),
+            "questions": questions,
+        });
+        return parse_request(&expanded);
+    }
     // Non-string states serialize PYTHON-style (json.dumps default
     // separators) - the port had serde's compact form here, which the
     // real-task suite caught as drift on every dict-state request.

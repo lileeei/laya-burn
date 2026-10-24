@@ -195,6 +195,22 @@ out.gates(); // [("department", Abstained), ...]
 End-to-end demo: `cargo run --release --example ask_demo` (cross-checks
 every answer against the raw API).
 
+### Task presets
+
+The five official frozen task sets, usable from BOTH surfaces:
+
+- Library: `presets::triage(&agent.ask(...)).run()` (also `email`,
+  `guard`, `moderation`, `model_routing`) - typed accessors for every
+  field.
+- HTTP: `POST /v1/decide {"state": ..., "questions": "triage"}` - the
+  preset name expands to its frozen question set; unknown names get a 400
+  listing the available five.
+
+Criteria wording is verbatim from the official presets.py, verified
+cross-SDK: the same triage input through laya 0.4.12 and laya-burn agrees
+on every field (intent exact, noul/score within 0.023 - float noise, no
+decision flips).
+
 ## Training (direction: trainable)
 
 `cargo run --release --example train_spike` is the trainability gate, and it

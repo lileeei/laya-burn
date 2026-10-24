@@ -8,6 +8,7 @@ pub mod inference;
 pub mod jev;
 pub mod model;
 pub mod options;
+pub mod presets;
 pub mod python_json;
 pub mod quant;
 pub mod router;

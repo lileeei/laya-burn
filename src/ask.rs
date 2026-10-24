@@ -26,9 +26,9 @@ use serde_json::Value;
 use crate::inference::{Answer, QuestionInput, RlAgent};
 
 /// A question under construction (one builder method = one typed field).
-struct Field {
-    qid: String,
-    input: QuestionInput,
+pub(crate) struct Field {
+    pub(crate) qid: String,
+    pub(crate) input: QuestionInput,
 }
 
 /// Builder over one state: each method adds one question; [Ask::run]
@@ -37,7 +37,7 @@ pub struct Ask<'a> {
     agent: &'a RlAgent,
     device: &'a burn::tensor::Device,
     state: Value,
-    fields: Vec<Field>,
+    pub(crate) fields: Vec<Field>,
 }
 
 impl<'a> Ask<'a> {
