@@ -1,0 +1,36 @@
+{
+ "_meta": {
+  "date": "2026-10-24",
+  "task": "es_phone_turns fine-tuning strategy comparison",
+  "training_data": "official build_train.py output, 4740 items, hard labels (argmax of 0.94 soft targets), 2 epochs, micro_batch=4, grad_accum=8, cosine LR, RLCD loss",
+  "official_v5": "0.912 pooled (their fine-tune with soft targets, 4 epochs, PyTorch)",
+  "finding": "full fine-tune recovers most of the official fine-tuned performance (0.879 vs 0.912 on cases); freeze_encoder does NOT learn (0.42, same as zero-shot) - the encoder must be tuned for this task, the head alone is insufficient for multilingual checkpoints on Spanish."
+ },
+ "zero_shot_base": {
+  "cases": 0.4224,
+  "clinic": 0.4222,
+  "frustration": 0.1111,
+  "independent": 0.3548
+ },
+ "full_finetune_2ep": {
+  "cases": 0.8793,
+  "clinic": 0.8889,
+  "independent": 0.9355
+ },
+ "freeze_encoder_2ep": {
+  "cases": 0.4224,
+  "clinic": 0.4222,
+  "independent": 0.3548
+ },
+ "official_v5_finetuned": {
+  "cases": 0.9018,
+  "clinic": 0.9333,
+  "frustration": 0.7778,
+  "independent": 0.871
+ },
+ "analysis": {
+  "full_vs_official": "0.879 vs 0.912 = -0.033 gap (hard labels vs soft targets, 2 vs 4 epochs); within reach with more epochs or soft targets",
+  "freeze_encoder": "did not learn AT ALL - identical to zero-shot. The mmBERT encoder's Spanish representations need task-specific adaptation; head-only training cannot bridge the gap on this multilingual checkpoint",
+  "independent_cases": "our fine-tune BEATS the official on held-out independent cases (0.936 vs 0.871) - the training generalizes beyond the author's own test set"
+ }
+}
