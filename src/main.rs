@@ -128,6 +128,7 @@ fn main() {
             let out = args.next().unwrap_or_else(|| "ft-out".to_string());
             let epochs: usize = args.next().and_then(|e| e.parse().ok()).unwrap_or(2);
             let micro_batch: usize = args.next().and_then(|e| e.parse().ok()).unwrap_or(0);
+
             run_finetune(&data, &model, &out, epochs, micro_batch, &load_opts);
             return;
         }
@@ -284,6 +285,11 @@ fn run_finetune(
     let cfg = laya_burn::train::TrainConfig {
         epochs,
         micro_batch: if micro_batch > 0 { micro_batch } else { 8 },
+        grad_accum: std::env::var("LAYA_GRAD_ACCUM")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8),
+        freeze_encoder: std::env::var("LAYA_FREEZE_ENCODER").is_ok(),
         loss,
         log: std::env::var("LAYA_TRAIN_LOG").is_ok(),
         ..Default::default()

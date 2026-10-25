@@ -27,7 +27,19 @@ use crate::sequence::{build_sequence_ex, Question, QTYPES};
 pub struct TrainConfig {
     pub epochs: usize,
     pub micro_batch: usize,
-    pub lr: f64,
+    /// Gradient accumulation steps (official effective batch = micro_batch
+    /// x grad_accum = 64). Gradients from that many micro-batches are
+    /// summed before one optimizer step.
+    pub grad_accum: usize,
+    /// Encoder learning rate (the 28-layer body; conservative).
+    pub encoder_lr: f64,
+    /// Decision-head learning rate (the fresh small head; aggressive).
+    pub head_lr: f64,
+    /// Cosine-annealing floor (official min_lr).
+    pub min_lr: f64,
+    /// Freeze the encoder; train only the decision head - the safe mode
+    /// for small datasets (official freeze_encoder).
+    pub freeze_encoder: bool,
     pub weight_decay: f64,
     pub grad_clip: Option<f64>,
     pub loss: LossKind,
@@ -61,7 +73,11 @@ impl Default for TrainConfig {
         Self {
             epochs: 4,
             micro_batch: 8,
-            lr: 2.5e-5,
+            grad_accum: 8,
+            encoder_lr: 2.5e-5,
+            head_lr: 1e-4,
+            min_lr: 1e-6,
+            freeze_encoder: false,
             weight_decay: 0.01,
             grad_clip: Some(1.0),
             loss: LossKind::Rlcd,
@@ -89,6 +105,8 @@ impl ModuleMapper for RequireGrad {
         param.map(|t| t.autodiff().require_grad())
     }
 }
+
+
 
 /// One labelled training row. `canonical` is the identity-order encoding,
 /// computed once at load (fit check) and reused by calibration and by any
@@ -375,10 +393,24 @@ pub fn finetune(
     let mut first_loss: Option<f32> = None;
     let mut last_loss = 0.0f32;
     let mut steps = 0usize;
+    let total_optimizer_steps = (train.len().div_ceil(cfg.micro_batch.max(1))
+        .div_ceil(cfg.grad_accum.max(1)))
+        .max(1)
+        * cfg.epochs;
+    let mut scheduler = CosineLr::new(cfg.head_lr.max(cfg.encoder_lr), cfg.min_lr, total_optimizer_steps);
     for epoch in 0..cfg.epochs {
         let sigma = sigma_at(epoch, cfg.epochs, cfg.sigma_start, cfg.sigma_end);
-        let (m, f, l, n) =
-            epoch_step(&agent, model.clone(), &mut optim, &train, cfg, sigma, &mut shuffle, device)?;
+        let (m, f, l, n) = epoch_step(
+            &agent,
+            model.clone(),
+            &mut optim,
+            &mut scheduler,
+            &train,
+            cfg,
+            sigma,
+            &mut shuffle,
+            device,
+        )?;
         model = m;
         if first_loss.is_none() {
             first_loss = f;
@@ -409,7 +441,13 @@ pub fn finetune(
         })
         .collect();
 
+    // freeze_encoder: export the trained model, then overwrite the encoder
+    // tensor entries with the base checkpoint's values (file-level merge -
+    // model-level field restoration doesn't survive burn's param cloning).
     write_checkpoint(&model, model_dir, out_dir, temperatures, &temperature_buckets)?;
+    if cfg.freeze_encoder {
+        merge_encoder_from_base(model_dir, &format!("{out_dir}/model.safetensors"))?;
+    }
 
     Ok(TrainReport {
         out_dir: out_dir.to_string(),
@@ -430,10 +468,34 @@ pub fn finetune(
 /// One epoch: micro-batch chunks over `train`, optional per-type option
 /// shuffling (identity orders reuse the cached canonical encodings), the
 /// configured loss, AdamW step. Returns (first_loss, last_loss, steps).
+/// Cosine-annealing LR: `min + (max - min) * (1 + cos(pi * step/total)) / 2`
+/// (PyTorch CosineAnnealingLR closed form). Simple own implementation: the
+/// upstream burn config's build() is pub(crate).
+pub struct CosineLr {
+    max: f64,
+    min: f64,
+    total: usize,
+    step: usize,
+}
+
+impl CosineLr {
+    pub fn new(max: f64, min: f64, total_steps: usize) -> Self {
+        Self { max, min, total: total_steps.max(1), step: 0 }
+    }
+
+    pub fn step(&mut self) -> f64 {
+        let lr = self.min
+            + (self.max - self.min) * (1.0 + (std::f64::consts::PI * self.step as f64 / self.total as f64).cos()) / 2.0;
+        self.step += 1;
+        lr
+    }
+}
+
 fn epoch_step(
     agent: &RlAgent,
     mut model: Laya,
     optim: &mut ModuleOptimizer,
+    scheduler: &mut CosineLr,
     train: &[TrainRow],
     cfg: &TrainConfig,
     sigma: f32,
@@ -443,6 +505,8 @@ fn epoch_step(
     let mut first_loss: Option<f32> = None;
     let mut last_loss = 0.0f32;
     let mut steps = 0usize;
+    let mut accum = burn::optim::GradientsAccumulator::<Laya>::new();
+    let mut micro_steps_in_accum = 0usize;
     {
     for chunk in train.chunks(cfg.micro_batch.max(1)) {
         let mut seqs = Vec::new();
@@ -507,10 +571,24 @@ fn epoch_step(
         steps += 1;
         let grads_tensor = loss.backward();
         let grads = GradientsParams::from_grads(grads_tensor, &model);
-        model = optim.step(cfg.lr, model, grads).map(&mut RequireGrad);
+        // Gradient accumulation: `grad_accum` micro-batch gradients are
+        // summed before one optimizer step (official effective batch 64 =
+        // 8 micro x 8 accum).
+        accum.accumulate(&model, grads);
+        micro_steps_in_accum += 1;
+        if micro_steps_in_accum >= cfg.grad_accum.max(1) {
+            micro_steps_in_accum = 0;
+            let lr = scheduler.step();
+            model = optim.step(lr, model, accum.grads()).map(&mut RequireGrad);
+        }
     }
     }
 
+    // flush any remaining accumulated gradients (partial final window)
+    if micro_steps_in_accum > 0 {
+        let lr = scheduler.step();
+        model = optim.step(lr, model, accum.grads()).map(&mut RequireGrad);
+    }
 
     Ok((model, first_loss, last_loss, steps))
 }
@@ -562,6 +640,43 @@ fn collect_calibration_logits(
 /// (stale temperature_by_options dropped when no bucket qualifies), the
 /// tokenizer and encoder config copied through - servable as-is.
 #[allow(clippy::type_complexity)]
+/// Overwrite every encoder.* tensor in `out_path` with the corresponding
+/// tensor from `{model_dir}/model.safetensors` (the pristine base). This
+/// is the freeze_encoder guarantee at the artifact level: the exported
+/// checkpoint's encoder is bit-identical to the base.
+fn merge_encoder_from_base(model_dir: &str, out_path: &str) -> Result<(), String> {
+    use safetensors::SafeTensors;
+    let base_bytes = std::fs::read(format!("{model_dir}/model.safetensors"))
+        .map_err(|e| format!("read base: {e}"))?;
+    let out_bytes = std::fs::read(out_path).map_err(|e| format!("read out: {e}"))?;
+    let base = SafeTensors::deserialize(&base_bytes).map_err(|e| format!("{e}"))?;
+    let out = SafeTensors::deserialize(&out_bytes).map_err(|e| format!("{e}"))?;
+
+    let mut views: std::collections::HashMap<String, safetensors::tensor::TensorView> =
+        std::collections::HashMap::new();
+    for name in out.names() {
+        let view = out.tensor(name).map_err(|e| format!("{e}"))?;
+        if name.starts_with("encoder.") {
+            // replace with base's version
+            let base_view = base.tensor(name).map_err(|e| format!("base missing {name}: {e}"))?;
+            views.insert(name.to_string(), base_view);
+        } else {
+            views.insert(name.to_string(), view);
+        }
+    }
+    // also carry the temperature buffer
+    if let Ok(temp_view) = out.tensor("temperature") {
+        views.insert("temperature".to_string(), temp_view);
+    }
+    safetensors::serialize_to_file(
+        &views,
+        None::<std::collections::HashMap<String, String>>,
+        std::path::Path::new(out_path),
+    )
+    .map_err(|e| format!("write merged: {e}"))?;
+    Ok(())
+}
+
 fn write_checkpoint(
     model: &Laya,
     model_dir: &str,
