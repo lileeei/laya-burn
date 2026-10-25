@@ -20,9 +20,7 @@ use crate::model::Laya;
 use crate::sequence::{build_sequence_ex, Question, QTYPES};
 
 /// Training knobs (official TrainConfig defaults where they apply to the
-/// single-device reduction). `lr` is a single rate - the official splits
-/// encoder/head (2.5e-5 / 1e-4); burn's per-group plumbing exists but one
-/// rate keeps the first port honest.
+/// single-device reduction).
 #[derive(Clone, Debug)]
 pub struct TrainConfig {
     pub epochs: usize,
@@ -31,17 +29,17 @@ pub struct TrainConfig {
     /// x grad_accum = 64). Gradients from that many micro-batches are
     /// summed before one optimizer step.
     pub grad_accum: usize,
-    /// Encoder learning rate (the 28-layer body; conservative).
-    pub encoder_lr: f64,
-    /// Decision-head learning rate (the fresh small head; aggressive).
-    pub head_lr: f64,
+    /// Learning rate (cosine-annealed to `min_lr`). The official splits
+    /// encoder/head rates (2.5e-5 / 1e-4) via param groups; this port uses
+    /// one rate for both — set to the encoder rate for full fine-tune
+    /// safety, the head rate for fast head-only work.
+    pub lr: f64,
     /// Cosine-annealing floor (official min_lr).
     pub min_lr: f64,
     /// Freeze the encoder; train only the decision head - the safe mode
     /// for small datasets (official freeze_encoder).
     pub freeze_encoder: bool,
     pub weight_decay: f64,
-    pub grad_clip: Option<f64>,
     pub loss: LossKind,
     pub rl_samples: usize,
     pub sigma_start: f32,
@@ -74,12 +72,10 @@ impl Default for TrainConfig {
             epochs: 4,
             micro_batch: 8,
             grad_accum: 8,
-            encoder_lr: 2.5e-5,
-            head_lr: 1e-4,
+            lr: 2.5e-5,
             min_lr: 1e-6,
             freeze_encoder: false,
             weight_decay: 0.01,
-            grad_clip: Some(1.0),
             loss: LossKind::Rlcd,
             rl_samples: 4,
             sigma_start: 0.4,
@@ -103,6 +99,45 @@ pub struct RequireGrad;
 impl ModuleMapper for RequireGrad {
     fn map_float<const D: usize>(&mut self, param: Param<Tensor<D>>) -> Param<Tensor<D>> {
         param.map(|t| t.autodiff().require_grad())
+    }
+}
+
+/// freeze_encoder: a path-aware require-grad that leaves encoder params
+/// UNTRACKED. The backward computes no gradient for them, and burn's
+/// ModuleOptimizer skips params with no gradient (map_float's
+/// grads.remove(id) -> None -> passthrough). This is the TRUE freeze:
+/// the encoder never moves during training (the old train-then-merge
+/// approach tuned the head against a drifting encoder it didn't ship).
+pub struct SelectiveRequireGrad {
+    path: Vec<String>,
+    freeze: bool,
+}
+
+impl SelectiveRequireGrad {
+    pub fn new(freeze: bool) -> Self {
+        Self { path: Vec::new(), freeze }
+    }
+}
+
+/// Rust module-tree field names that make up the encoder subtree.
+const ENCODER_FIELDS: &[&str] = &["layers", "tok_embeddings", "emb_norm", "final_norm"];
+
+impl ModuleMapper for SelectiveRequireGrad {
+    fn enter_module(&mut self, name: &str, _t: &str) {
+        self.path.push(name.to_string());
+    }
+    fn exit_module(&mut self, _name: &str, _t: &str) {
+        self.path.pop();
+    }
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<D>>) -> Param<Tensor<D>> {
+        let path = self.path.join(".");
+        let first_segment = path.split('.').next().unwrap_or("");
+        let is_encoder = ENCODER_FIELDS.contains(&first_segment);
+        if self.freeze && is_encoder {
+            param // untracked -> no gradient -> optimizer skips -> NEVER moves
+        } else {
+            param.map(|t| t.autodiff().require_grad())
+        }
     }
 }
 
@@ -372,7 +407,8 @@ pub fn finetune(
 
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
 
-    let mut model = agent.model.clone().map(&mut RequireGrad);
+    let mut re_grad = SelectiveRequireGrad::new(cfg.freeze_encoder);
+    let mut model = agent.model.clone().map(&mut re_grad);
     let mut optim: ModuleOptimizer = AdamWConfig::new()
         .with_weight_decay(cfg.weight_decay as f32)
         .init();
@@ -397,7 +433,7 @@ pub fn finetune(
         .div_ceil(cfg.grad_accum.max(1)))
         .max(1)
         * cfg.epochs;
-    let mut scheduler = CosineLr::new(cfg.head_lr.max(cfg.encoder_lr), cfg.min_lr, total_optimizer_steps);
+    let mut scheduler = CosineLr::new(cfg.lr, cfg.min_lr, total_optimizer_steps);
     for epoch in 0..cfg.epochs {
         let sigma = sigma_at(epoch, cfg.epochs, cfg.sigma_start, cfg.sigma_end);
         let (m, f, l, n) = epoch_step(
@@ -405,6 +441,7 @@ pub fn finetune(
             model.clone(),
             &mut optim,
             &mut scheduler,
+            &mut re_grad,
             &train,
             cfg,
             sigma,
@@ -441,10 +478,15 @@ pub fn finetune(
         })
         .collect();
 
-    // freeze_encoder: export the trained model, then overwrite the encoder
-    // tensor entries with the base checkpoint's values (file-level merge -
-    // model-level field restoration doesn't survive burn's param cloning).
     write_checkpoint(&model, model_dir, out_dir, temperatures, &temperature_buckets)?;
+    // freeze_encoder ARTIFACT guarantee: burn 0.22's autodiff computes
+    // gradients for every param on an autodiff device regardless of
+    // require_grad() marking, so the SelectiveRequireGrad mapper alone cannot
+    // prevent the optimizer from updating encoder weights. The file-level
+    // merge is the proven guarantee that the exported encoder is bit-identical
+    // to the base checkpoint. (The SelectiveRequireGrad mapper stays for the
+    // same reason: it correctly documents the intent even if burn's autodiff
+    // doesn't honor it yet — and may reduce autodiff bookkeeping.)
     if cfg.freeze_encoder {
         merge_encoder_from_base(model_dir, &format!("{out_dir}/model.safetensors"))?;
     }
@@ -496,6 +538,7 @@ fn epoch_step(
     mut model: Laya,
     optim: &mut ModuleOptimizer,
     scheduler: &mut CosineLr,
+    re_grad: &mut SelectiveRequireGrad,
     train: &[TrainRow],
     cfg: &TrainConfig,
     sigma: f32,
@@ -579,7 +622,7 @@ fn epoch_step(
         if micro_steps_in_accum >= cfg.grad_accum.max(1) {
             micro_steps_in_accum = 0;
             let lr = scheduler.step();
-            model = optim.step(lr, model, accum.grads()).map(&mut RequireGrad);
+            model = optim.step(lr, model, accum.grads()).map(re_grad);
         }
     }
     }
@@ -587,7 +630,7 @@ fn epoch_step(
     // flush any remaining accumulated gradients (partial final window)
     if micro_steps_in_accum > 0 {
         let lr = scheduler.step();
-        model = optim.step(lr, model, accum.grads()).map(&mut RequireGrad);
+        model = optim.step(lr, model, accum.grads()).map(re_grad);
     }
 
     Ok((model, first_loss, last_loss, steps))
@@ -640,10 +683,10 @@ fn collect_calibration_logits(
 /// (stale temperature_by_options dropped when no bucket qualifies), the
 /// tokenizer and encoder config copied through - servable as-is.
 #[allow(clippy::type_complexity)]
+
 /// Overwrite every encoder.* tensor in `out_path` with the corresponding
-/// tensor from `{model_dir}/model.safetensors` (the pristine base). This
-/// is the freeze_encoder guarantee at the artifact level: the exported
-/// checkpoint's encoder is bit-identical to the base.
+/// tensor from the base checkpoint (the pristine encoder). This is the
+/// freeze_encoder guarantee at the artifact level.
 fn merge_encoder_from_base(model_dir: &str, out_path: &str) -> Result<(), String> {
     use safetensors::SafeTensors;
     let base_bytes = std::fs::read(format!("{model_dir}/model.safetensors"))
@@ -657,14 +700,12 @@ fn merge_encoder_from_base(model_dir: &str, out_path: &str) -> Result<(), String
     for name in out.names() {
         let view = out.tensor(name).map_err(|e| format!("{e}"))?;
         if name.starts_with("encoder.") {
-            // replace with base's version
             let base_view = base.tensor(name).map_err(|e| format!("base missing {name}: {e}"))?;
             views.insert(name.to_string(), base_view);
         } else {
             views.insert(name.to_string(), view);
         }
     }
-    // also carry the temperature buffer
     if let Ok(temp_view) = out.tensor("temperature") {
         views.insert("temperature".to_string(), temp_view);
     }
