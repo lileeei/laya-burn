@@ -127,6 +127,10 @@ Committed results:
   serialization on every dict-state request) - both fixed in jev.rs.
   Robustness: 16-way concurrent serving identical-answer stable, clean 400s
   on malformed requests, language routing correct.
+- `evals/es_phone_finetune_comparison.json` *(vs official)* — fine-tuning
+  strategy comparison: full fine-tune 0.42→0.88 (official 0.40→0.91),
+  freeze_encoder does not learn on multilingual checkpoints. Reproduce:
+  `scripts/run_es_phone_finetune.sh`.
 - `evals/official_benchmarks_results.json` *(vs official)* — the official frozen-prompt
   benchmark suites: es_phone_turns (Spanish phone routing), feishu_zh
   (Chinese chat triage, choice + four-noul modes), and the banking77
@@ -173,6 +177,8 @@ Committed results:
 | `LAYA_STATE`, `LAYA_LONG` | demo binary: zh/ru demo state, long-sequence variant |
 | `LAYA_BATCH_MS`, `LAYA_BATCH_MAX` | serve micro-batching window (ms) and max batch — routes concurrent requests through one predict_many |
 | `LAYA_TRAIN_LOSS=ce`, `LAYA_TRAIN_LOG=1` | finetune: CE-only ablation / per-step loss logging |
+| `LAYA_FREEZE_ENCODER=1` | finetune: freeze encoder (artifact-level guarantee; see train.rs docs) |
+| `LAYA_GRAD_ACCUM=N` | finetune: gradient accumulation steps (default 8) |
 | `LAYA_CONVERT`, `LAYA_PARITY_DEBUG` | legacy convert alias; rlcd_core parity debug output |
 
 Env vars resolve at the binary edge (`LoadOptions::from_env` / `ForwardOptions::from_env`, once); library code reads none (Router::new is the documented serving adapter).
@@ -228,6 +234,20 @@ cross-SDK: the same triage input through laya 0.4.12 and laya-burn agrees
 on every field (intent exact, noul/score within 0.023 - float noise, no
 decision flips).
 
+## Python bindings
+
+`pyffi/` is a PyO3 binding crate (its own `[workspace]` to escape the root
+build). Build and install with `cd pyffi && maturin develop --release`
+(creates a venv first with `python3 -m venv .venv && source .venv/bin/activate`).
+
+```python
+import laya_burn
+agent = laya_burn.Agent("model-english")     # 0.6s load (flex CPU)
+out = agent.decide("state", {...})            # typed: {"team": "billing"}
+raw = agent.predict("state", {...})           # full probabilities
+laya_burn.finetune("model", "data.jsonl", "out")  # fine-tune
+```
+
 ## Training (direction: trainable)
 
 `cargo run --release --example train_spike` is the trainability gate, and it
@@ -266,8 +286,8 @@ and burn 0.22's repeat_dim backward misrouting through reshape (now tracked
 slices + cat). With RLCD restored to the official default, the zh_commands
 acceptance run reaches 0.944 accuracy / ECE 0.068 (CE-only memorization
 reaches 1.0 - RLCD's exploration noise costs a little on an 18-case set).
-Remaining deviation: the official effective batch is 64 via grad
-accumulation; this port steps per micro-batch.
+Remaining deviation: the official splits encoder/head learning rates;
+this port uses one rate for both.
 
 ## WebAssembly
 

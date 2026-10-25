@@ -13,7 +13,7 @@ use crate::inference::{Answer, QuestionInput};
 /// Criterion text must be the PLAIN string, not serde Display (which quotes
 /// it); non-strings fall back to their JSON form. Port of rl_common's
 /// render_options.
-fn render_options(qtype: &str, criteria: &Value) -> Vec<String> {
+pub fn render_options(qtype: &str, criteria: &Value) -> Vec<String> {
     let text = |v: &Value| -> String {
         match v {
             Value::String(s) => s.clone(),

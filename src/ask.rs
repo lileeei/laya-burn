@@ -134,8 +134,11 @@ impl Answers {
 
     /// The chosen option (a criteria key), for choice questions.
     pub fn choice(&self, qid: &str) -> &str {
+        let input = self.input(qid);
         match self.answer(qid) {
-            Answer::Choice { index, .. } => self.input(qid).keys[*index].as_str(),
+            Answer::Choice { index, .. } => {
+                input.keys.get(*index).or_else(|| input.options.get(*index)).unwrap().as_str()
+            }
             other => panic!("{qid}: expected choice, got {other:?}"),
         }
     }
@@ -154,6 +157,12 @@ impl Answers {
             Answer::Score { score, .. } => score.round() as i32,
             other => panic!("{qid}: expected score, got {other:?}"),
         }
+    }
+
+    /// The typed value as JSON (single projection used by pyffi and any
+    /// future embedder).
+    pub fn typed(&self, qid: &str) -> serde_json::Value {
+        crate::inference::typed_value(self.answer(qid), self.input(qid))
     }
 
     /// p(reported answer) - the calibration column the gate reads.
@@ -229,13 +238,12 @@ impl Gate {
         crate::calibration::Calibration::temp_bucket(qtype, k)
     }
 
-    /// Apply the policy to every answer, recording the three-state verdict.
-    /// Buckets without a threshold pass untouched (an unset bucket means no
-    /// policy for that shape, not a zero bar). Answers carry
-    /// [Answers::gates] afterwards; the answers themselves are unchanged -
-    /// abstaining is the CALLER's action to take.
-    pub fn apply(&self, answers: &mut Answers) {
-        answers.gate_states.clear();
+    /// Evaluate the policy for every answer, returning the three-state
+    /// verdict per question id. Questions whose bucket has no threshold get
+    /// None (the gate ran but made no decision for that shape). Abstaining
+    /// is the CALLER's action.
+    pub fn evaluate(&self, answers: &Answers) -> Vec<(String, Option<GateState>)> {
+        let mut out = Vec::new();
         for (qid, input, ans) in &answers.rows {
             let k = match ans {
                 Answer::Choice { probabilities, .. } | Answer::Score { probabilities, .. } => {
@@ -245,7 +253,7 @@ impl Gate {
             };
             let bucket = Self::bucket_of(input.qtype, k);
             let state = match self.by_bucket.get(&bucket) {
-                None => continue, // no policy for this bucket
+                None => None, // gate ran but no policy for this bucket
                 Some(&min) => {
                     let conf = match ans {
                         Answer::Choice { index, probabilities, .. } => {
@@ -258,15 +266,16 @@ impl Gate {
                             .into(),
                         Answer::Noul { prob, .. } => Some(prob.max(1.0 - prob)),
                     };
-                    match conf {
+                    Some(match conf {
                         Some(c) if c >= min => GateState::Passed,
                         Some(_) => GateState::Abstained,
                         None => GateState::Unevaluated,
-                    }
+                    })
                 }
             };
-            answers.gate_states.push((qid.clone(), state));
+            out.push((qid.clone(), state));
         }
+        out
     }
 }
 
@@ -291,13 +300,13 @@ fn choice_input(qid: &str, options: &[&str]) -> QuestionInput {
 /// Pure noul mapping: the two default arms (same rendering the wire path
 /// produces for a criteria-less noul question).
 fn noul_input(qid: &str) -> QuestionInput {
+    // Delegate arm rendering to the wire protocol's renderer (single source
+    // for the noul default arms).
+    let rendered = crate::jev::render_options("noul", &serde_json::Value::Null);
     QuestionInput {
         qtype: 2,
         instructions: qid.to_string(),
-        options: vec![
-            "false: no, the statement does not hold".into(),
-            "true: yes, the statement holds".into(),
-        ],
+        options: rendered,
         keys: vec!["false".into(), "true".into()],
         option_order: None,
     }

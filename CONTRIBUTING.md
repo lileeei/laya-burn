@@ -54,6 +54,7 @@ warnings; `cargo clippy` is advisory but appreciated.
 | `src/router.rs` | multi-checkpoint routing (script/language detection) |
 | `src/calibration.rs` | temperature bucket/clamp/fit - the single home |
 | `src/presets.rs` | the five frozen task sets |
+| `pyffi/` | Python bindings (own `[workspace]` — see its README section) |
 | `evals/` | evaluation harnesses (Python; `vs official` ones need `LAYA_OFFICIAL`) |
 | `tests/fixtures/` | committed binary fixtures (RLCD gradient parity) |
 | `wasm/` | browser spike crate |

@@ -29,13 +29,13 @@ fn main() {
     println!("urgency:          {}", out.score("urgency"));
     println!("confidences:      {:?}", out.ids().map(|id| (id, out.answer_confidence(id))).collect::<Vec<_>>());
 
-    let mut out = out;
+    let out = out;
     let gate = Gate::new()
         .min("choice:3-5", 0.9) // high bar for the 3-option choice
         .min("noul:2", 0.5)
         .min("score:3-5", 0.5);
-    gate.apply(&mut out);
-    println!("gates: {:?}", out.gates());
+    let gates = gate.evaluate(&out);
+    println!("gates: {:?}", gates);
 
     // Cross-check against the raw API: same questions through
     // system_one must give the same answers.

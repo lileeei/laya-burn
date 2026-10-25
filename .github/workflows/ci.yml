@@ -20,6 +20,9 @@ jobs:
         shell: bash
       - name: wasm32 gate (lib, no serve)
         run: cargo build --release --locked --target wasm32-unknown-unknown -p laya-burn --lib --no-default-features
+      - name: pyffi gate (Python bindings compile)
+        working-directory: pyffi
+        run: cargo check --locked
       - name: wasm32 gate (runtime surface)
         working-directory: wasm
         run: cargo build --release --locked --target wasm32-unknown-unknown --features runtime

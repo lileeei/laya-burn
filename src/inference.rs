@@ -122,6 +122,20 @@ fn read_temperatures(
 /// Pure math over (z, temp, qtype, act_probability); this is the test
 /// surface for everything the evals measure (bucket resolution, temperature
 /// sharpening, round4, answer_confidence, expected score).
+/// The typed projection: one Answer -> its domain value, given the
+/// QuestionInput it answers. Single owner consumed by ask.rs's typed
+/// accessors and pyffi's decide().
+pub fn typed_value(a: &Answer, q: &QuestionInput) -> serde_json::Value {
+    match a {
+        Answer::Choice { index, .. } => {
+            let key = q.keys.get(*index).or_else(|| q.options.get(*index));
+            serde_json::json!(key.cloned().unwrap_or_default())
+        }
+        Answer::Noul { prob, .. } => serde_json::json!(prob >= &0.5),
+        Answer::Score { score, .. } => serde_json::json!(score.round() as i32),
+    }
+}
+
 pub(crate) fn answer_from_logits(z: &[f32], temp: f64, qtype: usize, act_probability: f32) -> Answer {
     let k = z.len();
     let p = Calibration::probabilities(z, k, temp);
