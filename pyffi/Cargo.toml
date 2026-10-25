@@ -1,0 +1,21 @@
+[package]
+name = "laya-burn-py"
+version = "0.1.0"
+edition = "2024"
+description = "Python bindings for laya-burn"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "laya_burn"
+crate-type = ["cdylib"]
+
+[dependencies]
+laya-burn = { path = ".." }
+burn = { version = "0.22", default-features = false, features = ["flex", "std"] }
+serde_json = "1"
+
+[dependencies.pyo3]
+version = "0.22"
+features = ["extension-module"]
+
+[workspace]
