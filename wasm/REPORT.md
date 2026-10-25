@@ -196,3 +196,60 @@ Three wasm-specific findings, for anyone following this path:
 
 Serve with `python3 -m http.server 8765 --directory <repo root>` and open
 `/wasm/www/index.html` (the page fetches `/model-multilingual/*`).
+
+---
+
+## WebGPU inference: exact design (deferred, Direction 2)
+
+The WebGPU path requires these changes, in order. Each is a separate PR-sized
+unit; together they are ~2-3 days of work:
+
+### 1. Async device init (half day)
+```rust
+// In laya_init_q8, after loading on flex:
+let gpu = Device::wgpu_options()
+    .graphics_api(WgpuBackend::WebGpu)
+    .init_async()   // <- returns a future; the current sync path panics on wasm
+    .await?;
+let model = agent.model.to_device(&gpu);  // upload f32 weights
+```
+The init_async() call works on wasm (verified by the spike's `webgpu_tensor_sum`).
+The upload (flex → webgpu) should work because it's a push, not a pull.
+
+### 2. Device-side decision tail (1-1.5 days) — THE HARD PART
+Currently `run_rows` does:
+```rust
+let logits = logits.to_data().as_slice::<f32>().unwrap().to_vec();  // PANICS on wasm+GPU
+// ... scalar math per question (temperature, softmax, argmax, expected_score)
+```
+This must become tensor-ops on the device:
+```rust
+// Apply per-question temperature (build a [rows, 1] temp tensor)
+let z = logits / temp_tensor;
+// Softmax on device
+let p = z.softmax_dim(1);
+// Argmax on device
+let answers_idx = p.argmax_dim(1);
+// ONE small async readback of [rows] indices
+let idx_data = answers_idx.into_data_async().await;
+```
+Complications:
+- Per-question temperature varies by bucket (choice:11+ vs choice:3-5 etc.)
+  — need to build a per-row temperature tensor from the bucket lookup
+- Noul questions need p[1] (not argmax) — read the specific column
+- Score questions need expected value (sum(i * p_i)) — doable with tensor ops
+- The act_logits readback needs the same treatment
+
+### 3. Async wasm export (half day)
+`laya_decide` becomes `async fn` (wasm-bindgen supports this with the `async`
+feature); the JS side `await`s it. The decision tail's `into_data_async` is
+the only await point.
+
+### 4. Upload after dequant (trivial)
+The eager dequant already runs on flex. After it completes, `to_device(&gpu)`
+uploads the f32 weights. No code change in the dequant itself.
+
+### Blocker summary
+The ONE fundamental blocker is #2: the decision tail must become device-side
+tensor ops. Everything else is plumbing. Once #2 is done, the browser goes
+from flex CPU (~2.2s/question) to WebGPU (~0.2-0.5s/question expected).
