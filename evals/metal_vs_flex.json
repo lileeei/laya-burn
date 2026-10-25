@@ -1,0 +1,48 @@
+{
+ "_meta": {
+  "date": "2026-10-24",
+  "hardware": "Apple M-series (this machine)",
+  "conditions": "LAYA_BURNPACK=safetensors (f32), warmed, 3 repeats per batch size, serve API",
+  "verdict": "Metal and flex are LATENCY-EQUIVALENT across all batch sizes on this workload. Metal's real advantage is load time: ~0.6s vs ~9s (15x). The compute itself is CPU/AMX-bound on flex and Metal doesn't gain - the model's 28-layer encoder with sliding-window attention doesn't benefit enough from GPU parallelism at these batch sizes to overcome dispatch overhead. Accuracy is IDENTICAL (both 0.80 on MASSIVE en, same as flex f32 within float noise)."
+ },
+ "latency": {
+  "single_question": {
+   "flex_p50_ms": 20.7,
+   "metal_p50_ms": 20.4,
+   "metal_q8_p50_ms": 19.3
+  },
+  "10_questions": {
+   "flex_p50_ms": 174.4,
+   "metal_p50_ms": 172.7,
+   "metal_q8_p50_ms": 142.9
+  },
+  "50_questions": {
+   "flex_p50_ms": 897.4,
+   "metal_p50_ms": 870.0,
+   "metal_q8_p50_ms": 873.7
+  },
+  "batch_50q_20opt": {
+   "flex_p50_ms": 2806,
+   "metal_p50_ms": 2808
+  },
+  "batch_100q_20opt": {
+   "flex_p50_ms": 5598,
+   "metal_p50_ms": 5592
+  },
+  "batch_200q_20opt": {
+   "flex_p50_ms": 11550,
+   "metal_p50_ms": 11297
+  }
+ },
+ "accuracy": {
+  "flex_f32": 0.8,
+  "metal_f32": 0.8,
+  "metal_q8": 0.8
+ },
+ "load_time": {
+  "flex_s": 9.0,
+  "metal_s": 0.6,
+  "ratio": "15x"
+ },
+ "recommendation": "For serving: use flex (default) - identical latency, simpler. For cold-start-sensitive deployments (CLI tools, serverless): LAYA_DEVICE=metal for 15x faster checkpoint load. Q8 pack on Metal gives the best single-question latency (19.3ms)."
+}

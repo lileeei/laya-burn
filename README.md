@@ -70,6 +70,14 @@ load, bit-identical to the kernel path (verified by round-trip). Weights live
 dequantized in memory, so runtime compute and latency equal f32; the win is
 artifact size and (with `LAYA_QUANT=1`, no artifact) it also works quantize-at-load.
 
+**Device comparison** (evals/metal_vs_flex.json): Metal and flex are
+latency-equivalent across all batch sizes on this workload (the encoder's
+sliding-window attention is AMX-bound on flex and doesn't gain enough from
+GPU parallelism to overcome dispatch overhead). Metal's real advantage is
+**load time: 0.6s vs 9.0s (15x)** — use `LAYA_DEVICE=metal` for
+cold-start-sensitive deployments. Q8 on Metal gives the best single-question
+latency (19.3ms). Accuracy is identical across all three configurations.
+
 ## Burnpack (f32)
 
 `LAYA_CONVERT=<dir>` (in `main`) exports `model.mpk` + `model.mpk.json` sidecar;
@@ -148,7 +156,7 @@ Committed results:
 
 | var | effect |
 |---|---|
-| `LAYA_DEVICE` | `metal` / `wgpu` (default flex CPU) — demo binary device pick |
+| `LAYA_DEVICE` | `metal` / `wgpu` (default flex CPU); see evals/metal_vs_flex.json |
 | `LAYA_DTYPE` | `bf16` / `f16` compute dtype (default f32, parity-verified) |
 | `LAYA_MODEL` | force router route (english/typed-decisions/multilingual/auto) |
 | `LAYA_BURNPACK` | `q8` / `1`/`f32` / `safetensors` force an artifact; unset prefers q8 pack, then f32 pack, then safetensors |
